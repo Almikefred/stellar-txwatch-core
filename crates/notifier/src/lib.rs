@@ -11,10 +11,10 @@ const MAX_RETRIES: u32 = 3;
 /// exponential backoff (2 s → 4 s → 8 s). Logs each attempt.
 /// If `secret` is Some, adds an `X-TxWatch-Secret` header to every request.
 pub async fn send_webhook(
-    client:  &Client,
-    url:     &str,
+    client: &Client,
+    url: &str,
     payload: &AlertPayload,
-    secret:  Option<&str>,
+    secret: Option<&str>,
 ) -> Result<()> {
     let body = serde_json::to_string(payload)?;
     let mut last_err: Option<anyhow::Error> = None;
@@ -30,8 +30,7 @@ pub async fn send_webhook(
         if let Some(s) = secret {
             req = req.header("X-TxWatch-Secret", s);
         }
-        match req.send().await
-        {
+        match req.send().await {
             Ok(resp) if resp.status().is_success() => {
                 info!(
                     timestamp = %ts,
@@ -92,10 +91,7 @@ pub fn test_payload(label: &str, webhook_url: &str) -> AlertPayload {
         function_name:    Some("test".into()),
         amount_xlm:       None,
         timestamp:        Utc::now().timestamp(),
-        horizon_link:     format!(
-            "https://horizon-testnet.stellar.org/transactions/\
-             0000000000000000000000000000000000000000000000000000000000000000"
-        ),
+        horizon_link: "https://horizon-testnet.stellar.org/transactions/0000000000000000000000000000000000000000000000000000000000000000".into(),
         explorer_link:    "https://stellar.expert/explorer/testnet/tx/0000000000000000000000000000000000000000000000000000000000000000".into(),
     }
     // suppress unused webhook_url warning — callers use it to POST
@@ -113,16 +109,16 @@ mod tests {
 
     fn sample_payload() -> AlertPayload {
         AlertPayload {
-            label:            "Test Contract".into(),
-            contract_id:      "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
-            network:          "testnet".into(),
-            rule_triggered:   "AnyTransaction".into(),
+            label: "Test Contract".into(),
+            contract_id: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            network: "testnet".into(),
+            rule_triggered: "AnyTransaction".into(),
             transaction_hash: "abc123".into(),
-            function_name:    None,
-            amount_xlm:       None,
-            timestamp:        1_700_000_000,
-            horizon_link:     "https://horizon-testnet.stellar.org/transactions/abc123".into(),
-            explorer_link:    "https://stellar.expert/explorer/testnet/tx/abc123".into(),
+            function_name: None,
+            amount_xlm: None,
+            timestamp: 1_700_000_000,
+            horizon_link: "https://horizon-testnet.stellar.org/transactions/abc123".into(),
+            explorer_link: "https://stellar.expert/explorer/testnet/tx/abc123".into(),
         }
     }
 
