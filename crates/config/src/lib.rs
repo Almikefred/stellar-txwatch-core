@@ -191,6 +191,12 @@ impl AppConfig {
         for contract in &self.contracts {
             contract.validate()?;
         }
+        let mut seen = std::collections::HashSet::new();
+        for contract in &self.contracts {
+            if !seen.insert(&contract.label) {
+                bail!("duplicate contract label '{}'", contract.label);
+            }
+        }
         Ok(())
     }
 }
@@ -285,6 +291,17 @@ mod tests {
     fn network_explorer_urls() {
         assert!(Network::Mainnet.explorer_base_url().contains("public"));
         assert!(Network::Testnet.explorer_base_url().contains("testnet"));
+    }
+
+    #[test]
+    fn rejects_duplicate_labels() {
+        let c = valid_contract();
+        let cfg = AppConfig {
+            poll_interval_seconds: 10,
+            contracts: vec![c.clone(), c],
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("duplicate contract label"));
     }
 
     #[test]
