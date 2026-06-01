@@ -161,21 +161,53 @@ async fn poll_contract(
         .horizon_base_url_override
         .as_deref()
         .unwrap_or_else(|| contract.network.horizon_base_url());
-    let url  = format!(
-        "{}/accounts/{}/transactions?cursor={}&order=asc&limit=200",
-        base, contract.contract_id, cursor
-    );
 
-    let page: HorizonPage = client
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("GET {} failed", url))?
-        .json()
-        .await
-        .with_context(|| format!("failed to parse Horizon response from {}", url))?;
+    // Paginate: fetch pages of up to 200 records until a page with fewer than 200
+    // records is returned. Use a page_cursor variable so the per-record cursor
+    // updates below still advance the global cursors map immediately.
+    let mut page_cursor = cursor.clone();
+    let mut all_records: Vec<HorizonTransaction> = Vec::new();
 
-    let records = page._embedded.records;
+    loop {
+        let url = format!(
+            "{}/accounts/{}/transactions?cursor={}&order=asc&limit=200",
+            base, contract.contract_id, page_cursor
+        );
+
+        let page: HorizonPage = client
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {} failed", url))?
+            .json()
+            .await
+            .with_context(|| format!("failed to parse Horizon response from {}", url))?;
+
+        let records = page._embedded.records;
+
+        if records.is_empty() {
+            break;
+        }
+
+        for r in records.iter() {
+            all_records.push(r.clone());
+        }
+
+        // If this page had fewer than the max (200), it is the last page.
+        if all_records.len() % 200 != 0 || records.len() < 200 {
+            break;
+        }
+
+        // Advance the cursor to the last paging_token so the next request returns
+        // records after the last one we just processed.
+        if let Some(last) = all_records.last() {
+            page_cursor = last.paging_token.clone();
+        } else {
+            break;
+        }
+    }
+
+    let records = all_records;
 
     if !records.is_empty() {
         info!(
@@ -473,5 +505,67 @@ mod tests {
         assert!(!version.is_empty());
         assert_eq!(contracts_list, "Contract A, Contract B, Contract C");
         assert_eq!(networks, "mainnet, testnet");
+    }
+
+    #[tokio::test]
+    async fn poll_handles_pagination_two_pages() {
+        use std::collections::HashMap;
+
+        let server = MockServer::start().await;
+
+        // Build first page with 200 transactions
+        let mut records1 = Vec::new();
+        for i in 1..=200 {
+            records1.push(serde_json::json!({
+                "hash": format!("tx{}", i),
+                "created_at": "2020-01-01T00:00:00Z",
+                "successful": true,
+                "paging_token": format!("{}", i),
+            }));
+        }
+        let page1 = serde_json::json!({ "_embedded": { "records": records1 }});
+
+        // Second page with one transaction
+        let page2 = serde_json::json!({ "_embedded": { "records": [
+            { "hash": "tx201", "created_at": "2020-01-01T00:00:01Z", "successful": true, "paging_token": "201" }
+        ] }});
+
+        // Mount mocks in sequence: first GET -> page1, second GET -> page2
+        Mock::given(method("GET"))
+            .and(path_regex("/accounts/.*/transactions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page1))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path_regex("/accounts/.*/transactions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page2))
+            .mount(&server)
+            .await;
+
+        // Operations endpoint: return empty ops for every tx
+        Mock::given(method("GET"))
+            .and(path_regex("/transactions/.*/operations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(empty_page()))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let mut contract = WatchedContract {
+            label: "Contract".into(),
+            contract_id: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            network: Network::Testnet,
+            rules: vec![AlertRule::AnyTransaction],
+            webhook_url: format!("{}/hooks", server.uri()),
+            webhook_secret: None,
+            horizon_base_url_override: Some(server.uri()),
+        };
+
+        let mut cursors: HashMap<String, String> = HashMap::new();
+        cursors.insert(contract.contract_id.clone(), "now".to_string());
+
+        let (txs, alerts) = poll_contract(&client, &contract, &mut cursors).await.unwrap();
+        assert_eq!(txs, 201);
+        assert_eq!(alerts, 201);
     }
 }
