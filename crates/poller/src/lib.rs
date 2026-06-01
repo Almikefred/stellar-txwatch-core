@@ -58,8 +58,8 @@ struct Counters {
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Run the polling loop forever. Each contract is polled sequentially;
-/// a single bad transaction never stops the loop.
+/// Run the polling loop forever. Each contract is polled concurrently via a
+/// tokio JoinSet; one slow or failing contract never blocks the others.
 /// Logs a summary every 60 seconds: contracts watched, transactions processed,
 /// alerts fired.
 pub async fn run(cfg: AppConfig) -> Result<()> {
@@ -126,27 +126,59 @@ pub async fn run(cfg: AppConfig) -> Result<()> {
     });
 
     loop {
+        let mut set: tokio::task::JoinSet<(String, String, Result<(u64, u64)>)> =
+            tokio::task::JoinSet::new();
+
         for contract in &cfg.contracts {
-            match poll_contract(&client, contract, &mut cursors).await {
-                Ok((txs, alerts)) => {
-                    counters.transactions.fetch_add(txs, Ordering::Relaxed);
-                    counters.alerts.fetch_add(alerts, Ordering::Relaxed);
-                    counters
-                        .interval_transactions
-                        .fetch_add(txs, Ordering::Relaxed);
-                    counters
-                        .interval_alerts
-                        .fetch_add(alerts, Ordering::Relaxed);
+            let client_clone = client.clone();
+            let contract_clone = contract.clone();
+            let cursor = cursors
+                .get(&contract.contract_id)
+                .cloned()
+                .unwrap_or_else(|| "now".to_string());
+
+            set.spawn(async move {
+                let contract_id = contract_clone.contract_id.clone();
+                let mut local_cursors = HashMap::new();
+                local_cursors.insert(contract_id.clone(), cursor);
+                let result =
+                    poll_contract(&client_clone, &contract_clone, &mut local_cursors).await;
+                let new_cursor = local_cursors
+                    .remove(&contract_id)
+                    .unwrap_or_else(|| "now".to_string());
+                (contract_id, new_cursor, result)
+            });
+        }
+
+        while let Some(task_result) = set.join_next().await {
+            match task_result {
+                Ok((contract_id, new_cursor, poll_result)) => {
+                    cursors.insert(contract_id, new_cursor);
+                    match poll_result {
+                        Ok((txs, alerts)) => {
+                            counters.transactions.fetch_add(txs, Ordering::Relaxed);
+                            counters.alerts.fetch_add(alerts, Ordering::Relaxed);
+                            counters
+                                .interval_transactions
+                                .fetch_add(txs, Ordering::Relaxed);
+                            counters
+                                .interval_alerts
+                                .fetch_add(alerts, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            error!(
+                                error = %e,
+                                "poll cycle error — will retry next interval"
+                            );
+                        }
+                    }
                 }
-                Err(e) => {
-                    error!(
-                        contract = %contract.label,
-                        error    = %e,
-                        "poll cycle error — will retry next interval"
-                    );
+                Err(join_err) => {
+                    error!(error = %join_err, "contract polling task panicked");
                 }
             }
         }
+
         tokio::time::sleep(interval).await;
     }
 }
