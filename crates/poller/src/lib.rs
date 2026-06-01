@@ -50,8 +50,10 @@ struct OpsEmbedded {
 
 #[derive(Default)]
 struct Counters {
-    transactions: AtomicU64,
-    alerts:       AtomicU64,
+    transactions:          AtomicU64,
+    alerts:                AtomicU64,
+    interval_transactions: AtomicU64,
+    interval_alerts:       AtomicU64,
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -103,10 +105,14 @@ pub async fn run(cfg: AppConfig) -> Result<()> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(summary_every).await;
+            let interval_txs    = counters_clone.interval_transactions.swap(0, Ordering::Relaxed);
+            let interval_alerts = counters_clone.interval_alerts.swap(0, Ordering::Relaxed);
             info!(
-                contracts    = n_contracts,
-                transactions = counters_clone.transactions.load(Ordering::Relaxed),
-                alerts       = counters_clone.alerts.load(Ordering::Relaxed),
+                contracts             = n_contracts,
+                transactions_total    = counters_clone.transactions.load(Ordering::Relaxed),
+                alerts_total          = counters_clone.alerts.load(Ordering::Relaxed),
+                transactions_interval = interval_txs,
+                alerts_interval       = interval_alerts,
                 "60-second summary"
             );
         }
@@ -118,6 +124,8 @@ pub async fn run(cfg: AppConfig) -> Result<()> {
                 Ok((txs, alerts)) => {
                     counters.transactions.fetch_add(txs, Ordering::Relaxed);
                     counters.alerts.fetch_add(alerts, Ordering::Relaxed);
+                    counters.interval_transactions.fetch_add(txs, Ordering::Relaxed);
+                    counters.interval_alerts.fetch_add(alerts, Ordering::Relaxed);
                 }
                 Err(e) => {
                     error!(
