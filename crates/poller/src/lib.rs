@@ -64,20 +64,9 @@ struct Counters {
 /// alerts fired.
 /// Backwards-compatible wrapper: default (non-dry) run
 pub async fn run(cfg: AppConfig) -> Result<()> {
-<<<<<<< Fix-no--dry-run-flag-for-the-watch-command
-    run_with(cfg, false).await
-}
-
-/// Run the polling loop forever. When `dry_run` is true, matched rules are logged
-/// but webhooks are not sent.
-pub async fn run_with(cfg: AppConfig, dry_run: bool) -> Result<()> {
-    // Build HTTP client with connection pool tuning options.
-    let max_idle = cfg.http_pool_max_idle_per_host.unwrap_or(10);
-=======
     // Build HTTP client: start from the shared base configuration (timeout, etc.)
     // then apply pool-tuning options from the app config.
     let max_idle       = cfg.http_pool_max_idle_per_host.unwrap_or(10);
->>>>>>> main
     let keepalive_secs = cfg.http_tcp_keepalive_secs.unwrap_or(30);
 
     let client = Client::builder()
@@ -122,15 +111,9 @@ pub async fn run_with(cfg: AppConfig, dry_run: bool) -> Result<()> {
         version        = env!("CARGO_PKG_VERSION"),
         contracts      = n_contracts,
         contracts_list = %contracts_list,
-<<<<<<< Fix-no--dry-run-flag-for-the-watch-command
-        networks      = %networks_str,
-        interval_secs = cfg.poll_interval_seconds,
-        dry_run       = dry_run,
-=======
         networks       = %networks_str,
         horizon_urls   = %horizon_urls_str,
         interval_secs  = cfg.poll_interval_seconds,
->>>>>>> main
         "TxWatch polling engine started"
     );
 
@@ -214,10 +197,6 @@ async fn poll_contract(
         .horizon_base_url_override
         .as_deref()
         .unwrap_or_else(|| contract.network.horizon_base_url());
-    let url  = format!(
-        "{}/accounts/{}/transactions?cursor={}&order=asc&limit=200",
-        base, contract.contract_id, cursor
-    );
 
     let response = client
         .get(&url)
@@ -246,7 +225,29 @@ async fn poll_contract(
         .await
         .with_context(|| format!("failed to parse Horizon response from {}", url))?;
 
-    let records = page._embedded.records;
+        if records.is_empty() {
+            break;
+        }
+
+        for r in records.iter() {
+            all_records.push(r.clone());
+        }
+
+        // If this page had fewer than the max (200), it is the last page.
+        if all_records.len() % 200 != 0 || records.len() < 200 {
+            break;
+        }
+
+        // Advance the cursor to the last paging_token so the next request returns
+        // records after the last one we just processed.
+        if let Some(last) = all_records.last() {
+            page_cursor = last.paging_token.clone();
+        } else {
+            break;
+        }
+    }
+
+    let records = all_records;
 
     if !records.is_empty() {
         info!(
@@ -616,5 +617,67 @@ mod tests {
         // Issue #114: horizon URLs must include network name and URL for each distinct network
         assert!(horizon_urls.contains("mainnet=https://horizon.stellar.org"));
         assert!(horizon_urls.contains("testnet=https://horizon-testnet.stellar.org"));
+    }
+
+    #[tokio::test]
+    async fn poll_handles_pagination_two_pages() {
+        use std::collections::HashMap;
+
+        let server = MockServer::start().await;
+
+        // Build first page with 200 transactions
+        let mut records1 = Vec::new();
+        for i in 1..=200 {
+            records1.push(serde_json::json!({
+                "hash": format!("tx{}", i),
+                "created_at": "2020-01-01T00:00:00Z",
+                "successful": true,
+                "paging_token": format!("{}", i),
+            }));
+        }
+        let page1 = serde_json::json!({ "_embedded": { "records": records1 }});
+
+        // Second page with one transaction
+        let page2 = serde_json::json!({ "_embedded": { "records": [
+            { "hash": "tx201", "created_at": "2020-01-01T00:00:01Z", "successful": true, "paging_token": "201" }
+        ] }});
+
+        // Mount mocks in sequence: first GET -> page1, second GET -> page2
+        Mock::given(method("GET"))
+            .and(path_regex("/accounts/.*/transactions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page1))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path_regex("/accounts/.*/transactions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page2))
+            .mount(&server)
+            .await;
+
+        // Operations endpoint: return empty ops for every tx
+        Mock::given(method("GET"))
+            .and(path_regex("/transactions/.*/operations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(empty_page()))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let mut contract = WatchedContract {
+            label: "Contract".into(),
+            contract_id: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            network: Network::Testnet,
+            rules: vec![AlertRule::AnyTransaction],
+            webhook_url: format!("{}/hooks", server.uri()),
+            webhook_secret: None,
+            horizon_base_url_override: Some(server.uri()),
+        };
+
+        let mut cursors: HashMap<String, String> = HashMap::new();
+        cursors.insert(contract.contract_id.clone(), "now".to_string());
+
+        let (txs, alerts) = poll_contract(&client, &contract, &mut cursors).await.unwrap();
+        assert_eq!(txs, 201);
+        assert_eq!(alerts, 201);
     }
 }
