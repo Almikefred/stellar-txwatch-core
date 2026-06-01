@@ -115,21 +115,39 @@ pub async fn run(cfg: AppConfig) -> Result<()> {
         "TxWatch polling engine started"
     );
 
-    // Spawn the summary logger task.
-    let counters_clone = Arc::clone(&counters);
-    tokio::spawn(async move {
+    if cfg.poll_interval_seconds < 10 && cfg.contracts.len() > 5 {
+        warn!(
+            poll_interval_seconds = cfg.poll_interval_seconds,
+            contracts = cfg.contracts.len(),
+            "polling interval is very short with many contracts — Horizon rate limits may apply; \
+             consider poll_interval_seconds >= 10"
+        );
+    }
+
+    // Spawn the summary logger under a restart supervisor so that panics are logged
+    // and the task restarts automatically rather than being silently swallowed.
+    let counters_for_summary = Arc::clone(&counters);
+    let _summary_guard = tokio::spawn(async move {
         loop {
-            tokio::time::sleep(summary_every).await;
-            let interval_txs    = counters_clone.interval_transactions.swap(0, Ordering::Relaxed);
-            let interval_alerts = counters_clone.interval_alerts.swap(0, Ordering::Relaxed);
-            info!(
-                contracts             = n_contracts,
-                transactions_total    = counters_clone.transactions.load(Ordering::Relaxed),
-                alerts_total          = counters_clone.alerts.load(Ordering::Relaxed),
-                transactions_interval = interval_txs,
-                alerts_interval       = interval_alerts,
-                "60-second summary"
-            );
+            let c = Arc::clone(&counters_for_summary);
+            let handle = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(summary_every).await;
+                    let interval_txs    = c.interval_transactions.swap(0, Ordering::Relaxed);
+                    let interval_alerts = c.interval_alerts.swap(0, Ordering::Relaxed);
+                    info!(
+                        contracts             = n_contracts,
+                        transactions_total    = c.transactions.load(Ordering::Relaxed),
+                        alerts_total          = c.alerts.load(Ordering::Relaxed),
+                        transactions_interval = interval_txs,
+                        alerts_interval       = interval_alerts,
+                        "60-second summary"
+                    );
+                }
+            });
+            if let Err(e) = handle.await {
+                error!(error = ?e, "summary logger panicked — restarting");
+            }
         }
     });
 
@@ -462,6 +480,39 @@ mod tests {
 
         assert!(fn_names.is_empty());
         assert!(amount.is_none());
+    }
+
+    #[tokio::test]
+    async fn poll_contract_does_not_advance_cursor_on_fetch_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex("/accounts/.*/transactions"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let client      = Client::new();
+        let contract_id = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let mut cursors: HashMap<String, String> = HashMap::new();
+        cursors.insert(contract_id.to_string(), "now".to_string());
+
+        let contract = WatchedContract {
+            label:       "test".into(),
+            contract_id: contract_id.into(),
+            network:     Network::Testnet,
+            rules:       vec![AlertRule::AnyTransaction],
+            webhook_url: "https://hooks.example.com/test".into(),
+            webhook_secret: None,
+            horizon_base_url_override: Some(server.uri()),
+        };
+
+        let result = poll_contract(&client, &contract, &mut cursors).await;
+        assert!(result.is_err(), "expected Err when Horizon returns 500");
+        assert_eq!(
+            cursors.get(contract_id).map(String::as_str),
+            Some("now"),
+            "cursor must not advance when the transactions fetch fails"
+        );
     }
 
     #[test]
