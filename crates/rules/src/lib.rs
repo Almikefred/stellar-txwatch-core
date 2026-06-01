@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![deny(clippy::unwrap_used)]
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -240,6 +241,7 @@ impl AlertPayload {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use chrono::Datelike;

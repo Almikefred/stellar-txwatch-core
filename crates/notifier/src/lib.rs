@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use anyhow::{anyhow, Result};
+use bytes::Bytes;
 use reqwest::Client;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
@@ -17,13 +18,13 @@ pub async fn send_webhook(
     payload: &AlertPayload,
     secret: Option<&str>,
 ) -> Result<()> {
-    let body = serde_json::to_string(payload)?;
+    let body: Bytes = serde_json::to_string(payload)?.into();
     let mut last_err: Option<anyhow::Error> = None;
 
     for attempt in 1..=MAX_RETRIES {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_else(|_| Duration::from_secs(0))
             .as_secs();
 
         let mut req = client

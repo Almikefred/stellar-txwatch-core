@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![deny(clippy::unwrap_used)]
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -277,6 +278,7 @@ impl AppConfig {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
