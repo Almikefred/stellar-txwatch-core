@@ -162,6 +162,8 @@ async fn poll_contract(
         let paging_token = raw_tx.paging_token.clone();
         let tx_hash      = raw_tx.hash.clone();
 
+        // Advance the cursor before enrichment so the transaction is not re-processed
+        // even when op enrichment fails (for example, Horizon /operations returns 500).
         cursors.insert(contract.contract_id.clone(), paging_token.clone());
 
         let (function_name, amount_stroops) =
@@ -275,6 +277,7 @@ async fn fetch_soroban_details(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use txwatch_config::{AlertRule, Network};
     use wiremock::matchers::{method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -382,5 +385,51 @@ mod tests {
 
         assert!(fn_name.is_none());
         assert!(amount.is_none());
+    }
+
+    #[tokio::test]
+    async fn poll_advances_cursor_and_evaluates_rules_when_operation_enrichment_fails_with_500_response() {
+        let horizon = MockServer::start().await;
+        let receiver = MockServer::start().await;
+
+        let contract = WatchedContract {
+            label: "Enrichment Failure Contract".into(),
+            contract_id: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            network: Network::Testnet,
+            rules: vec![AlertRule::AnyTransaction],
+            webhook_url: format!("{}/hook", receiver.uri()),
+            webhook_secret: None,
+        };
+
+        Mock::given(method("GET"))
+            .and(path_regex("/accounts/.*/transactions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(tx_page("hash500", "100", true)))
+            .mount(&horizon)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path_regex("/transactions/hash500/operations"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&horizon)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path_regex("/hook"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&receiver)
+            .await;
+
+        let client = Client::new();
+        let mut cursors = HashMap::new();
+        cursors.insert(contract.contract_id.clone(), "now".to_string());
+
+        let (tx_count, alert_count) = poll_contract(&client, &contract, &mut cursors)
+            .await
+            .unwrap();
+
+        assert_eq!(tx_count, 1);
+        assert_eq!(alert_count, 1);
+        assert_eq!(cursors.get(&contract.contract_id).map(String::as_str), Some("100"));
     }
 }
