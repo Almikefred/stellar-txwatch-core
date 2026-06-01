@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
