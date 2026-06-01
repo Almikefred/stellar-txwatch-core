@@ -140,6 +140,9 @@ pub fn evaluate(
         .collect()
 }
 
+// NOTE: When adding a new AlertRule variant, update both `eval_rule()` and
+// `rule_label()` together. Rust's exhaustive matching catches missing arms,
+// but this convention should be preserved for new rule variants.
 fn eval_rule(rule: &AlertRule, tx: &EnrichedTransaction) -> Result<bool> {
     Ok(match rule {
         AlertRule::AnyTransaction => true,
@@ -174,6 +177,9 @@ fn eval_rule(rule: &AlertRule, tx: &EnrichedTransaction) -> Result<bool> {
     })
 }
 
+// NOTE: When adding a new AlertRule variant, update both `eval_rule()` and
+// `rule_label()` together. Rust's exhaustive matching catches missing arms,
+// but this convention should be preserved for new rule variants.
 fn rule_label(rule: &AlertRule) -> String {
     match rule {
         AlertRule::AnyTransaction                          => "AnyTransaction".into(),
