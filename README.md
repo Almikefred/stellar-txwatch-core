@@ -196,6 +196,9 @@ See [docs/alert-rules.md](docs/alert-rules.md) for full details.
 **Fields:**
 - `rule_type` — stable machine-readable rule variant (e.g. `"LargeTransfer"`, `"HighFee"`); use this for programmatic routing
 - `rule_triggered` — human-readable rule description with parameters (e.g. `"LargeTransfer(>=10000XLM)"`); use this for display
+- `function_name` — the first invoked Soroban function name, or `null` for non-Soroban transactions.
+- `horizon_link` — direct URL to the transaction on Horizon; always present for every alert.
+- `explorer_link` — Stellar Expert explorer URL for the transaction; always present even for non-Soroban transactions.
 
 `horizon_link` is a direct URL to the transaction on Horizon — paste it into a browser
 or the [Stellar Expert explorer](https://stellar.expert) to inspect the full XDR.
