@@ -77,21 +77,34 @@ async fn main() -> Result<()> {
                 println!(
                     "  [{network}] {label}",
                     network = c.network.display_name(),
-                    label   = c.label
+                    label = c.label
                 );
                 println!("    contract_id  : {}", c.contract_id);
                 println!("    webhook_url  : {}", c.webhook_url);
-                println!("    secret       : {}", if c.webhook_secret.is_some() { "set" } else { "none" });
+                println!(
+                    "    secret       : {}",
+                    if c.webhook_secret.is_some() {
+                        "set"
+                    } else {
+                        "none"
+                    }
+                );
                 println!("    rules        : {}", c.rules.len());
                 println!("    horizon      : {}", c.network.horizon_base_url());
-                println!("    explorer     : {}/contract/{}", c.network.explorer_base_url(), c.contract_id);
+                println!(
+                    "    explorer     : {}/contract/{}",
+                    c.network.explorer_base_url(),
+                    c.contract_id
+                );
             }
         }
 
         Command::TestWebhook { url, label } => {
             let cfg = AppConfig::from_file(&cli.config)?;
             if cfg.contracts.is_empty() {
-                return Err(anyhow::anyhow!("config has no contracts; cannot derive network for test-webhook"));
+                return Err(anyhow::anyhow!(
+                    "config has no contracts; cannot derive network for test-webhook"
+                ));
             }
             let first_contract = &cfg.contracts[0];
             let network_name = first_contract.network.as_str();

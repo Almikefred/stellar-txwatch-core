@@ -50,10 +50,10 @@ struct OpsEmbedded {
 
 #[derive(Default)]
 struct Counters {
-    transactions:          AtomicU64,
-    alerts:                AtomicU64,
+    transactions: AtomicU64,
+    alerts: AtomicU64,
     interval_transactions: AtomicU64,
-    interval_alerts:       AtomicU64,
+    interval_alerts: AtomicU64,
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -82,12 +82,17 @@ pub async fn run(cfg: AppConfig) -> Result<()> {
         .map(|c| (c.contract_id.clone(), "now".to_string()))
         .collect();
 
-    let interval      = Duration::from_secs(cfg.poll_interval_seconds);
+    let interval = Duration::from_secs(cfg.poll_interval_seconds);
     let summary_every = Duration::from_secs(60);
-    let counters      = Arc::new(Counters::default());
-    let n_contracts   = cfg.contracts.len();
+    let counters = Arc::new(Counters::default());
+    let n_contracts = cfg.contracts.len();
 
-    let contracts_list = cfg.contracts.iter().map(|c| c.label.as_str()).collect::<Vec<_>>().join(", ");
+    let contracts_list = cfg
+        .contracts
+        .iter()
+        .map(|c| c.label.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
     let mut networks: Vec<&str> = cfg.contracts.iter().map(|c| c.network.as_str()).collect();
     networks.sort();
     networks.dedup();
@@ -159,8 +164,12 @@ pub async fn run(cfg: AppConfig) -> Result<()> {
                 Ok((txs, alerts)) => {
                     counters.transactions.fetch_add(txs, Ordering::Relaxed);
                     counters.alerts.fetch_add(alerts, Ordering::Relaxed);
-                    counters.interval_transactions.fetch_add(txs, Ordering::Relaxed);
-                    counters.interval_alerts.fetch_add(alerts, Ordering::Relaxed);
+                    counters
+                        .interval_transactions
+                        .fetch_add(txs, Ordering::Relaxed);
+                    counters
+                        .interval_alerts
+                        .fetch_add(alerts, Ordering::Relaxed);
                 }
                 Err(e) => {
                     error!(
@@ -179,7 +188,7 @@ pub async fn run(cfg: AppConfig) -> Result<()> {
 
 /// Returns `(transactions_processed, alerts_fired)`.
 async fn poll_contract(
-    client:   &Client,
+    client: &Client,
     contract: &WatchedContract,
     cursors:  &mut HashMap<String, String>,
     dry_run: bool,
@@ -255,8 +264,7 @@ async fn poll_contract(
             count    = records.len(),
             "fetched new transactions"
         );
-    }
-    else {
+    } else {
         debug!(
             contract = %contract.label,
             cursor   = %cursor,
@@ -264,12 +272,12 @@ async fn poll_contract(
         );
     }
 
-    let mut tx_count    = 0u64;
+    let mut tx_count = 0u64;
     let mut alert_count = 0u64;
 
     for raw_tx in records {
         let paging_token = raw_tx.paging_token.clone();
-        let tx_hash      = raw_tx.hash.clone();
+        let tx_hash = raw_tx.hash.clone();
 
         // Advance the cursor before enrichment so the transaction is not re-processed
         // even when op enrichment fails (for example, Horizon /operations returns 500).
@@ -289,18 +297,19 @@ async fn poll_contract(
                 }
             };
 
-        let enriched = match EnrichedTransaction::from_horizon(raw_tx, function_names, amount_stroops, None) {
-            Ok(t)  => t,
-            Err(e) => {
-                warn!(
-                    contract = %contract.label,
-                    tx       = %tx_hash,
-                    error    = %e,
-                    "skipping transaction due to enrichment error"
-                );
-                continue;
-            }
-        };
+        let enriched =
+            match EnrichedTransaction::from_horizon(raw_tx, function_names, amount_stroops, None) {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!(
+                        contract = %contract.label,
+                        tx       = %tx_hash,
+                        error    = %e,
+                        "skipping transaction due to enrichment error"
+                    );
+                    continue;
+                }
+            };
 
         tx_count += 1;
 
@@ -371,8 +380,8 @@ async fn poll_contract(
 // ── Soroban operation enrichment ──────────────────────────────────────────────
 
 async fn fetch_soroban_details(
-    client:  &Client,
-    base:    &str,
+    client: &Client,
+    base: &str,
     tx_hash: &str,
 ) -> Result<(Vec<String>, Option<u64>)> {
     let url = format!("{}/transactions/{}/operations", base, tx_hash);
@@ -387,8 +396,8 @@ async fn fetch_soroban_details(
         .with_context(|| format!("failed to parse operations from {}", url))?;
 
     let mut function_names: Vec<String> = Vec::new();
-    let mut total_stroops:  u64         = 0;
-    let mut has_payment:    bool        = false;
+    let mut total_stroops: u64 = 0;
+    let mut has_payment: bool = false;
 
     for op in page._embedded.records {
         if op.op_type == "invoke_host_function" {
@@ -406,7 +415,11 @@ async fn fetch_soroban_details(
         }
     }
 
-    let amount_stroops = if has_payment { Some(total_stroops) } else { None };
+    let amount_stroops = if has_payment {
+        Some(total_stroops)
+    } else {
+        None
+    };
 
     Ok((function_names, amount_stroops))
 }

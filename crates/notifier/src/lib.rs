@@ -181,10 +181,10 @@ mod tests {
             function_names:   vec![],
             amount_xlm:       None,
             fee_charged_stroops: None,
-            timestamp:        1_700_000_000,
-            timestamp_iso:    "2023-11-15T03:13:20Z".into(),
-            horizon_link:     "https://horizon-testnet.stellar.org/transactions/abc123".into(),
-            explorer_link:    "https://stellar.expert/explorer/testnet/tx/abc123".into(),
+            timestamp: 1_700_000_000,
+            timestamp_iso: "2023-11-15T03:13:20Z".into(),
+            horizon_link: "https://horizon-testnet.stellar.org/transactions/abc123".into(),
+            explorer_link: "https://stellar.expert/explorer/testnet/tx/abc123".into(),
         }
     }
 
@@ -291,7 +291,9 @@ mod tests {
 
         let client = build_client().unwrap();
         let url = format!("{}/hook", server.uri());
-        send_webhook(&client, &url, &sample_payload(), None).await.unwrap();
+        send_webhook(&client, &url, &sample_payload(), None)
+            .await
+            .unwrap();
 
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);

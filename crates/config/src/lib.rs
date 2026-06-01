@@ -19,16 +19,16 @@ pub enum Network {
 impl Network {
     pub fn horizon_base_url(&self) -> &'static str {
         match self {
-            Network::Mainnet   => "https://horizon.stellar.org",
-            Network::Testnet   => "https://horizon-testnet.stellar.org",
+            Network::Mainnet => "https://horizon.stellar.org",
+            Network::Testnet => "https://horizon-testnet.stellar.org",
             Network::Futurenet => "https://horizon-futurenet.stellar.org",
         }
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            Network::Mainnet   => "mainnet",
-            Network::Testnet   => "testnet",
+            Network::Mainnet => "mainnet",
+            Network::Testnet => "testnet",
             Network::Futurenet => "futurenet",
         }
     }
@@ -36,8 +36,8 @@ impl Network {
     /// Human-readable display name shown in logs and CLI output.
     pub fn display_name(&self) -> &'static str {
         match self {
-            Network::Mainnet   => "Stellar Mainnet",
-            Network::Testnet   => "Stellar Testnet",
+            Network::Mainnet => "Stellar Mainnet",
+            Network::Testnet => "Stellar Testnet",
             Network::Futurenet => "Stellar Futurenet",
         }
     }
@@ -45,8 +45,8 @@ impl Network {
     /// Stellar Expert explorer base URL for this network.
     pub fn explorer_base_url(&self) -> &'static str {
         match self {
-            Network::Mainnet   => "https://stellar.expert/explorer/public",
-            Network::Testnet   => "https://stellar.expert/explorer/testnet",
+            Network::Mainnet => "https://stellar.expert/explorer/public",
+            Network::Testnet => "https://stellar.expert/explorer/testnet",
             Network::Futurenet => "https://stellar.expert/explorer/futurenet",
         }
     }
@@ -152,10 +152,10 @@ impl AlertRule {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WatchedContract {
-    pub label:       String,
+    pub label: String,
     pub contract_id: String,
-    pub network:     Network,
-    pub rules:       Vec<AlertRule>,
+    pub network: Network,
+    pub rules: Vec<AlertRule>,
     pub webhook_url: String,
     /// Optional secret sent as X-TxWatch-Secret header on every webhook POST.
     /// Supports `${ENV_VAR}` interpolation (e.g. `webhook_secret = "${MY_SECRET}"`).
@@ -277,10 +277,7 @@ where
 /// Resolves a `${VAR_NAME}` reference to the corresponding environment variable.
 /// Values that don't match the `${...}` pattern are returned unchanged.
 fn resolve_env_interpolation(value: &str) -> Result<String> {
-    match value
-        .strip_prefix("${")
-        .and_then(|s| s.strip_suffix('}'))
-    {
+    match value.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
         Some(var_name) => env::var(var_name)
             .with_context(|| format!("env var '{}' referenced in config is not set", var_name)),
         None => Ok(value.to_owned()),
@@ -288,6 +285,15 @@ fn resolve_env_interpolation(value: &str) -> Result<String> {
 }
 
 impl AppConfig {
+    fn resolve_env_vars(&mut self) -> Result<()> {
+        for contract in &mut self.contracts {
+            if let Some(secret) = &contract.webhook_secret {
+                contract.webhook_secret = Some(resolve_env_interpolation(secret)?);
+            }
+        }
+        Ok(())
+    }
+
     pub fn from_file(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("cannot read config file '{}'", path.display()))?;
@@ -339,11 +345,11 @@ mod tests {
 
     fn valid_contract() -> WatchedContract {
         WatchedContract {
-            label:          "Test".into(),
-            contract_id:    "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
-            network:        Network::Testnet,
-            rules:          vec![AlertRule::AnyTransaction],
-            webhook_url:    "https://example.com/hook".into(),
+            label: "Test".into(),
+            contract_id: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            network: Network::Testnet,
+            rules: vec![AlertRule::AnyTransaction],
+            webhook_url: "https://example.com/hook".into(),
             webhook_secret: None,
             horizon_base_url_override: None,
         }
@@ -439,14 +445,18 @@ mod tests {
     #[test]
     fn rejects_empty_function_name() {
         let mut c = valid_contract();
-        c.rules = vec![AlertRule::FunctionCalled { function_name: "  ".into() }];
+        c.rules = vec![AlertRule::FunctionCalled {
+            function_name: "  ".into(),
+        }];
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn rejects_empty_admin_function_names() {
         let mut c = valid_contract();
-        c.rules = vec![AlertRule::AdminFunctionCalled { function_names: vec![] }];
+        c.rules = vec![AlertRule::AdminFunctionCalled {
+            function_names: vec![],
+        }];
         assert!(c.validate().is_err());
     }
 
@@ -466,7 +476,9 @@ mod tests {
 
     #[test]
     fn network_urls() {
-        assert!(Network::Mainnet.horizon_base_url().contains("horizon.stellar.org"));
+        assert!(Network::Mainnet
+            .horizon_base_url()
+            .contains("horizon.stellar.org"));
         assert!(Network::Testnet.horizon_base_url().contains("testnet"));
         assert!(Network::Futurenet.horizon_base_url().contains("futurenet"));
     }
