@@ -191,6 +191,10 @@ AlertRule::MyNewRule { my_field } => {
 }
 ```
 
+> Note: Adding a new `AlertRule` variant requires updating both `eval_rule()` and
+> `rule_label()` in `crates/rules/src/lib.rs`. Rust's exhaustive matching helps
+> catch missing arms, but both functions must remain in sync for new variants.
+
 ### Step 4 — Label the rule (`crates/rules/src/lib.rs`)
 
 Add a match arm in `rule_label()`:
