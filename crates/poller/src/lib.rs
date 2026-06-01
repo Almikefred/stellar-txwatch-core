@@ -326,6 +326,15 @@ async fn poll_contract(
             &enriched,
         );
 
+        if payloads.is_empty() {
+            debug!(
+                contract = %contract.label,
+                tx       = %tx_hash,
+                rules    = ?contract.rules,
+                "transaction evaluated but no rules matched"
+            );
+        }
+
         for payload in payloads {
             alert_count += 1;
             // Always log the match; when dry_run is set, do not actually send the webhook.
