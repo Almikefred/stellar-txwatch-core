@@ -2,7 +2,8 @@
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use std::{fmt, fs, path::Path};
+use std::{env, fmt, fs, path::Path};
+use url::Url;
 
 // ── Network ───────────────────────────────────────────────────────────────────
 
@@ -66,8 +67,15 @@ pub enum AlertRule {
     LargeTransfer       { threshold_xlm: u64 },
     FunctionCalled      { function_name: String },
     AdminFunctionCalled { function_names: Vec<String> },
-    /// Fires when the transaction's fee (in stroops) exceeds the threshold.
-    HighFee             { threshold_stroops: u64 },
+    /// Fires when the transaction's fee exceeds the threshold.
+    /// Specify either `threshold_stroops` (raw stroops) or `threshold_xlm` (whole XLM,
+    /// converted to stroops during validation); the two are mutually exclusive.
+    HighFee {
+        #[serde(default)]
+        threshold_stroops: u64,
+        #[serde(default)]
+        threshold_xlm: Option<u64>,
+    },
 }
 
 impl AlertRule {
@@ -107,12 +115,30 @@ impl AlertRule {
                 }
             }
             AlertRule::AnyTransaction | AlertRule::TransactionFailed => {}
-            AlertRule::HighFee { threshold_stroops } => {
-                if *threshold_stroops == 0 {
-                    bail!(
+            AlertRule::HighFee { threshold_stroops, threshold_xlm } => {
+                match (*threshold_xlm, *threshold_stroops) {
+                    (Some(_), s) if s > 0 => bail!(
+                        "contract '{}': HighFee: specify either threshold_stroops or \
+                         threshold_xlm, not both",
+                        contract_label
+                    ),
+                    (None, 0) => bail!(
                         "contract '{}': HighFee threshold_stroops must be > 0",
                         contract_label
-                    );
+                    ),
+                    (Some(0), _) => bail!(
+                        "contract '{}': HighFee threshold_xlm must be > 0",
+                        contract_label
+                    ),
+                    (Some(xlm), 0) => {
+                        *threshold_stroops = xlm.checked_mul(10_000_000).with_context(|| {
+                            format!(
+                                "contract '{}': HighFee threshold_xlm overflow",
+                                contract_label
+                            )
+                        })?;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -249,6 +275,16 @@ impl AppConfig {
         cfg.resolve_env_vars()?;
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    fn resolve_env_vars(&mut self) -> Result<()> {
+        for contract in &mut self.contracts {
+            if let Some(secret) = &contract.webhook_secret {
+                contract.webhook_secret =
+                    Some(resolve_env_interpolation(secret)?);
+            }
+        }
+        Ok(())
     }
 
     pub fn validate(&mut self) -> Result<()> {
@@ -430,12 +466,70 @@ mod tests {
     #[test]
     fn rejects_duplicate_labels() {
         let c = valid_contract();
-        let cfg = AppConfig {
+        let mut cfg = AppConfig {
             poll_interval_seconds: 10,
             contracts: vec![c.clone(), c],
+            http_pool_max_idle_per_host: None,
+            http_tcp_keepalive_secs: None,
+            http_connection_verbose: None,
         };
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("duplicate contract label"));
+    }
+
+    // ── Issue #94: AppConfig::validate rejects empty contracts ────────────────
+
+    #[test]
+    fn appconfig_validate_rejects_empty_contracts() {
+        let mut cfg = AppConfig {
+            poll_interval_seconds: 10,
+            contracts: vec![],
+            http_pool_max_idle_per_host: None,
+            http_tcp_keepalive_secs: None,
+            http_connection_verbose: None,
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("at least one"),
+            "error should mention 'at least one', got: {}",
+            err
+        );
+    }
+
+    // ── Issue #96: HighFee threshold_xlm convenience alternative ─────────────
+
+    #[test]
+    fn high_fee_threshold_xlm_normalises_to_stroops() {
+        let mut c = valid_contract();
+        c.rules = vec![AlertRule::HighFee { threshold_stroops: 0, threshold_xlm: Some(1) }];
+        c.validate().unwrap();
+        if let AlertRule::HighFee { threshold_stroops, .. } = &c.rules[0] {
+            assert_eq!(*threshold_stroops, 10_000_000, "1 XLM should become 10_000_000 stroops");
+        } else {
+            panic!("expected HighFee");
+        }
+    }
+
+    #[test]
+    fn high_fee_threshold_xlm_zero_is_rejected() {
+        let mut c = valid_contract();
+        c.rules = vec![AlertRule::HighFee { threshold_stroops: 0, threshold_xlm: Some(0) }];
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn high_fee_both_thresholds_is_rejected() {
+        let mut c = valid_contract();
+        c.rules = vec![AlertRule::HighFee { threshold_stroops: 100, threshold_xlm: Some(1) }];
+        let err = c.validate().unwrap_err();
+        assert!(err.to_string().contains("not both"));
+    }
+
+    #[test]
+    fn high_fee_neither_threshold_is_rejected() {
+        let mut c = valid_contract();
+        c.rules = vec![AlertRule::HighFee { threshold_stroops: 0, threshold_xlm: None }];
+        assert!(c.validate().is_err());
     }
 
     #[test]

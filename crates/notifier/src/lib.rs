@@ -1,12 +1,22 @@
 #![forbid(unsafe_code)]
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
 use txwatch_rules::AlertPayload;
 
 const MAX_RETRIES: u32 = 3;
+
+/// Build the shared HTTP client used for all webhook deliveries.
+/// Enforces a 15-second request timeout, matching the production poller configuration,
+/// so that tests exercise the same timeout behaviour as production code.
+pub fn build_client() -> Result<Client> {
+    Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .context("failed to build HTTP client")
+}
 
 /// POST `payload` to `url`, retrying up to `MAX_RETRIES` times with
 /// exponential backoff (2 s → 4 s → 8 s). Logs each attempt.
@@ -84,10 +94,43 @@ pub async fn send_webhook(
     Err(err)
 }
 
+/// Build a synthetic `AlertPayload` suitable for `test-webhook`, using a specific network.
+pub fn test_payload_with_network(
+    label: &str,
+    webhook_url: &str,
+    network: &str,
+    horizon_base_url: &str,
+) -> AlertPayload {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let hash = "0000000000000000000000000000000000000000000000000000000000000000";
+    AlertPayload {
+        label:            label.to_string(),
+        contract_id:      "CTEST000000000000000000000000000000000000000000000000000".into(),
+        network:          network.to_string(),
+        rule_type:        "TestWebhook".into(),
+        rule_triggered:   "TestWebhook".into(),
+        transaction_hash: hash.into(),
+        function_name:    Some("test".into()),
+        function_names:   vec!["test".into()],
+        amount_xlm:       None,
+        fee_charged_stroops: None,
+        timestamp:        ts,
+        timestamp_iso:    "1970-01-01T00:00:00Z".into(),
+        horizon_link:     format!("{}/transactions/{}", horizon_base_url, hash),
+        explorer_link:    format!("https://stellar.expert/explorer/{}/tx/{}", network, hash),
+    }
+    .with_label(format!("{} (test-webhook to {})", label, webhook_url))
+}
+
 /// Build a synthetic `AlertPayload` suitable for `test-webhook`.
-/// Uses the provided network name and horizon base URL, falling back to testnet defaults if not provided.
 pub fn test_payload(label: &str, webhook_url: &str) -> AlertPayload {
-    let now = Utc::now();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     AlertPayload {
         label:            label.to_string(),
         contract_id:      "CTEST000000000000000000000000000000000000000000000000000".into(),
@@ -96,14 +139,14 @@ pub fn test_payload(label: &str, webhook_url: &str) -> AlertPayload {
         rule_triggered:   "TestWebhook".into(),
         transaction_hash: "0000000000000000000000000000000000000000000000000000000000000000".into(),
         function_name:    Some("test".into()),
+        function_names:   vec!["test".into()],
         amount_xlm:       None,
         fee_charged_stroops: None,
-        timestamp:        Utc::now().timestamp(),
-        horizon_link: "https://horizon-testnet.stellar.org/transactions/0000000000000000000000000000000000000000000000000000000000000000".into(),
+        timestamp:        ts,
+        timestamp_iso:    "1970-01-01T00:00:00Z".into(),
+        horizon_link:     "https://horizon-testnet.stellar.org/transactions/0000000000000000000000000000000000000000000000000000000000000000".into(),
         explorer_link:    "https://stellar.expert/explorer/testnet/tx/0000000000000000000000000000000000000000000000000000000000000000".into(),
     }
-    // suppress unused webhook_url warning — callers use it to POST
-    // but we include it in the payload label for clarity
     .with_label(format!("{} (test-webhook to {})", label, webhook_url))
 }
 
@@ -117,12 +160,14 @@ mod tests {
 
     fn sample_payload() -> AlertPayload {
         AlertPayload {
-            label: "Test Contract".into(),
-            contract_id: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
-            network: "testnet".into(),
-            rule_triggered: "AnyTransaction".into(),
+            label:            "Test Contract".into(),
+            contract_id:      "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            network:          "testnet".into(),
+            rule_type:        "AnyTransaction".into(),
+            rule_triggered:   "AnyTransaction".into(),
             transaction_hash: "abc123".into(),
             function_name:    None,
+            function_names:   vec![],
             amount_xlm:       None,
             fee_charged_stroops: None,
             timestamp:        1_700_000_000,
@@ -142,7 +187,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Client::new();
+        let client = build_client().unwrap();
         let url = format!("{}/hook", server.uri());
         let result = send_webhook(&client, &url, &sample_payload(), None).await;
         assert!(result.is_ok());
@@ -164,7 +209,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Client::new();
+        let client = build_client().unwrap();
         let url = format!("{}/hook", server.uri());
         let result = send_webhook(&client, &url, &sample_payload(), None).await;
         assert!(result.is_ok());
@@ -179,7 +224,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Client::new();
+        let client = build_client().unwrap();
         let url = format!("{}/hook", server.uri());
         send_webhook(&client, &url, &sample_payload(), Some("mysecret")).await.unwrap();
 
@@ -204,7 +249,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Client::new();
+        let client = build_client().unwrap();
         let url = format!("{}/hook", server.uri());
         send_webhook(&client, &url, &sample_payload(), None).await.unwrap();
 
@@ -225,7 +270,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Client::new();
+        let client = build_client().unwrap();
         let url = format!("{}/hook", server.uri());
         let result = send_webhook(&client, &url, &sample_payload(), None).await;
         assert!(result.is_err());
@@ -249,7 +294,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Client::new();
+        let client = build_client().unwrap();
         let url = format!("{}/hook", server.uri());
         let result = send_webhook(&client, &url, &sample_payload(), None).await;
         assert!(result.is_ok());
