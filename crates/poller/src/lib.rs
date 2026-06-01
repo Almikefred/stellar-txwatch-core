@@ -62,7 +62,14 @@ struct Counters {
 /// a single bad transaction never stops the loop.
 /// Logs a summary every 60 seconds: contracts watched, transactions processed,
 /// alerts fired.
+/// Backwards-compatible wrapper: default (non-dry) run
 pub async fn run(cfg: AppConfig) -> Result<()> {
+    run_with(cfg, false).await
+}
+
+/// Run the polling loop forever. When `dry_run` is true, matched rules are logged
+/// but webhooks are not sent.
+pub async fn run_with(cfg: AppConfig, dry_run: bool) -> Result<()> {
     // Build HTTP client with connection pool tuning options.
     let max_idle = cfg.http_pool_max_idle_per_host.unwrap_or(10);
     let keepalive_secs = cfg.http_tcp_keepalive_secs.unwrap_or(30);
@@ -97,6 +104,7 @@ pub async fn run(cfg: AppConfig) -> Result<()> {
         contracts_list = %contracts_list,
         networks      = %networks_str,
         interval_secs = cfg.poll_interval_seconds,
+        dry_run       = dry_run,
         "TxWatch polling engine started"
     );
 
@@ -120,7 +128,7 @@ pub async fn run(cfg: AppConfig) -> Result<()> {
 
     loop {
         for contract in &cfg.contracts {
-            match poll_contract(&client, contract, &mut cursors).await {
+            match poll_contract(&client, contract, &mut cursors, dry_run).await {
                 Ok((txs, alerts)) => {
                     counters.transactions.fetch_add(txs, Ordering::Relaxed);
                     counters.alerts.fetch_add(alerts, Ordering::Relaxed);
@@ -147,6 +155,7 @@ async fn poll_contract(
     client:   &Client,
     contract: &WatchedContract,
     cursors:  &mut HashMap<String, String>,
+    dry_run: bool,
 ) -> Result<(u64, u64)> {
     // Use contract_id as the cursor map key: contract IDs are unique per Stellar network,
     // making them a stable and collision-free key. Using label instead would be unsafe
@@ -244,25 +253,42 @@ async fn poll_contract(
 
         for payload in payloads {
             alert_count += 1;
+            // Always log the match; when dry_run is set, do not actually send the webhook.
             info!(
                 contract = %contract.label,
                 rule     = %payload.rule_triggered,
                 tx       = %payload.transaction_hash,
-                "rule fired — sending webhook"
+                "rule matched"
             );
-            if let Err(e) = send_webhook(
-                client,
-                &contract.webhook_url,
-                &payload,
-                contract.webhook_secret.as_deref(),
-            ).await {
-                error!(
+
+            if dry_run {
+                info!(
                     contract = %contract.label,
                     rule     = %payload.rule_triggered,
                     tx       = %payload.transaction_hash,
-                    error    = %e,
-                    "webhook delivery failed"
+                    "dry-run enabled: not sending webhook"
                 );
+            } else {
+                info!(
+                    contract = %contract.label,
+                    rule     = %payload.rule_triggered,
+                    tx       = %payload.transaction_hash,
+                    "rule fired — sending webhook"
+                );
+                if let Err(e) = send_webhook(
+                    client,
+                    &contract.webhook_url,
+                    &payload,
+                    contract.webhook_secret.as_deref(),
+                ).await {
+                    error!(
+                        contract = %contract.label,
+                        rule     = %payload.rule_triggered,
+                        tx       = %payload.transaction_hash,
+                        error    = %e,
+                        "webhook delivery failed"
+                    );
+                }
             }
         }
     }

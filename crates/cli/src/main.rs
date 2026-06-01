@@ -36,7 +36,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Start the polling engine (watches all contracts in the config)
-    Watch,
+    Watch {
+        /// Do not actually send webhooks; only log matched rules
+        #[arg(long)]
+        dry_run: bool,
+    },
 
     /// Parse and validate the config file, then print a summary
     ///
@@ -106,15 +110,16 @@ async fn main() -> Result<()> {
             println!("Test webhook delivered successfully to {}", url);
         }
 
-        Command::Watch => {
+        Command::Watch { dry_run } => {
             let cfg = AppConfig::from_file(&cli.config)?;
             info!(
                 version        = VERSION,
                 contracts      = cfg.contracts.len(),
                 interval_secs  = cfg.poll_interval_seconds,
+                dry_run        = dry_run,
                 "starting TxWatch"
             );
-            txwatch_poller::run(cfg).await?;
+            txwatch_poller::run_with(cfg, dry_run).await?;
         }
     }
 
