@@ -166,11 +166,29 @@ async fn poll_contract(
         base, contract.contract_id, cursor
     );
 
-    let page: HorizonPage = client
+    let response = client
         .get(&url)
         .send()
         .await
-        .with_context(|| format!("GET {} failed", url))?
+        .with_context(|| format!("GET {} failed", url))?;
+
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after = response
+            .headers()
+            .get("Retry-After")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(5);
+        warn!(
+            contract     = %contract.label,
+            retry_after  = retry_after,
+            "Horizon returned 429 — backing off"
+        );
+        tokio::time::sleep(Duration::from_secs(retry_after)).await;
+        return Ok((0, 0));
+    }
+
+    let page: HorizonPage = response
         .json()
         .await
         .with_context(|| format!("failed to parse Horizon response from {}", url))?;
@@ -434,6 +452,46 @@ mod tests {
 
         assert!(fn_names.is_empty());
         assert!(amount.is_none());
+    }
+
+    /// When Horizon returns 429 with a Retry-After header, poll_contract must
+    /// back off for the indicated duration and return (0, 0) without panicking.
+    #[tokio::test]
+    async fn poll_contract_backs_off_on_429_with_retry_after() {
+        use std::collections::HashMap;
+        use txwatch_config::{AlertRule, Network, WatchedContract};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex("/accounts/.*/transactions"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "1"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let contract = WatchedContract {
+            label: "test".into(),
+            contract_id: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            network: Network::Testnet,
+            rules: vec![AlertRule::AnyTransaction],
+            webhook_url: "https://hooks.example.com/test".into(),
+            webhook_secret: None,
+            horizon_base_url_override: Some(server.uri()),
+        };
+        let mut cursors: HashMap<String, String> = HashMap::new();
+        cursors.insert(contract.contract_id.clone(), "now".into());
+
+        let start = std::time::Instant::now();
+        let result = poll_contract(&client, &contract, &mut cursors).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), (0, 0));
+        // Should have slept at least ~1 second (Retry-After: 1)
+        assert!(elapsed >= Duration::from_millis(900), "expected backoff sleep, got {:?}", elapsed);
     }
 
     #[test]
