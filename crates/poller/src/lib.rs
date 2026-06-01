@@ -200,11 +200,29 @@ async fn poll_contract(
         base, contract.contract_id, cursor
     );
 
-    let page: HorizonPage = client
+    let response = client
         .get(&url)
         .send()
         .await
-        .with_context(|| format!("GET {} failed", url))?
+        .with_context(|| format!("GET {} failed", url))?;
+
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after = response
+            .headers()
+            .get("Retry-After")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(5);
+        warn!(
+            contract     = %contract.label,
+            retry_after  = retry_after,
+            "Horizon returned 429 — backing off"
+        );
+        tokio::time::sleep(Duration::from_secs(retry_after)).await;
+        return Ok((0, 0));
+    }
+
+    let page: HorizonPage = response
         .json()
         .await
         .with_context(|| format!("failed to parse Horizon response from {}", url))?;

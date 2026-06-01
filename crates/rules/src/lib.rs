@@ -461,6 +461,44 @@ mod tests {
     }
 
     #[test]
+    fn url_fields_have_no_trailing_slash_and_exact_format() {
+        // Verify both link fields are normalised even when base URLs have trailing slashes.
+        fn run_with_bases(horizon_base: &str, explorer_base: &str) -> AlertPayload {
+            let tx = EnrichedTransaction {
+                hash: "deadbeef".into(),
+                timestamp: "2024-01-15T12:00:00Z".parse().unwrap(),
+                successful: true,
+                paging_token: "1".into(),
+                function_names: vec![],
+                amount_stroops: None,
+                fee_charged_stroops: None,
+            };
+            let mut payloads = evaluate(
+                "L", "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "testnet", horizon_base, explorer_base,
+                &[AlertRule::AnyTransaction], &tx,
+            );
+            payloads.remove(0)
+        }
+
+        // Without trailing slash — baseline
+        let p = run_with_bases(
+            "https://horizon-testnet.stellar.org",
+            "https://stellar.expert/explorer/testnet",
+        );
+        assert_eq!(p.horizon_link,  "https://horizon-testnet.stellar.org/transactions/deadbeef");
+        assert_eq!(p.explorer_link, "https://stellar.expert/explorer/testnet/tx/deadbeef");
+
+        // With trailing slash — must produce identical output
+        let p2 = run_with_bases(
+            "https://horizon-testnet.stellar.org/",
+            "https://stellar.expert/explorer/testnet/",
+        );
+        assert_eq!(p.horizon_link,  p2.horizon_link);
+        assert_eq!(p.explorer_link, p2.explorer_link);
+    }
+
+    #[test]
     fn high_fee_fires_at_threshold() {
         let mut tx = make_tx(true, &[], None);
         tx.fee_charged_stroops = Some(10_000);
