@@ -262,6 +262,8 @@ mod tests {
         function_names: &[&str],
         amount_stroops: Option<u64>,
     ) -> EnrichedTransaction {
+        let function_names: Vec<String> = function_names.iter().map(|s| s.to_string()).collect();
+
         EnrichedTransaction {
             hash:           "abc123".into(),
             timestamp:      "2024-01-15T12:00:00Z".parse().unwrap(),
@@ -605,5 +607,43 @@ mod tests {
         assert_eq!(payloads[0].function_names, vec!["foo", "bar", "baz"]);
         // function_name (singular) is the first for backward compat
         assert_eq!(payloads[0].function_name.as_deref(), Some("foo"));
+    }
+
+    #[test]
+    fn alert_payload_serialises_to_valid_json_with_all_fields_present() {
+        let payload = AlertPayload {
+            label: "My Contract".into(),
+            contract_id: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            network: "testnet".into(),
+            rule_type: "LargeTransfer".into(),
+            rule_triggered: "LargeTransfer(>=10000XLM)".into(),
+            transaction_hash: "abc123".into(),
+            function_name: Some("transfer".into()),
+            function_names: vec!["transfer".into()],
+            amount_xlm: Some(15000),
+            fee_charged_stroops: Some(50000),
+            timestamp: 1705316096,
+            timestamp_iso: "2024-01-15T12:00:00Z".into(),
+            horizon_link: "https://horizon-testnet.stellar.org/transactions/abc123".into(),
+            explorer_link: "https://stellar.expert/explorer/testnet/tx/abc123".into(),
+        };
+
+        let json = serde_json::to_value(payload).expect("serialize AlertPayload to JSON");
+        let obj = json.as_object().expect("AlertPayload should serialize to a JSON object");
+
+        assert_eq!(obj["label"].as_str(), Some("My Contract"));
+        assert_eq!(obj["contract_id"].as_str(), Some("CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
+        assert_eq!(obj["network"].as_str(), Some("testnet"));
+        assert_eq!(obj["rule_type"].as_str(), Some("LargeTransfer"));
+        assert_eq!(obj["rule_triggered"].as_str(), Some("LargeTransfer(>=10000XLM)"));
+        assert_eq!(obj["transaction_hash"].as_str(), Some("abc123"));
+        assert_eq!(obj["function_name"].as_str(), Some("transfer"));
+        assert_eq!(obj["function_names"].as_array().map(|a| a.len()), Some(1));
+        assert_eq!(obj["amount_xlm"].as_u64(), Some(15000));
+        assert_eq!(obj["fee_charged_stroops"].as_u64(), Some(50000));
+        assert_eq!(obj["timestamp"].as_i64(), Some(1705316096));
+        assert_eq!(obj["timestamp_iso"].as_str(), Some("2024-01-15T12:00:00Z"));
+        assert_eq!(obj["horizon_link"].as_str(), Some("https://horizon-testnet.stellar.org/transactions/abc123"));
+        assert_eq!(obj["explorer_link"].as_str(), Some("https://stellar.expert/explorer/testnet/tx/abc123"));
     }
 }
