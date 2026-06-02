@@ -246,6 +246,35 @@ TxWatch uses `tracing` spans to correlate work across each poll cycle and webhoo
 
 Set `RUST_LOG=info` or a more specific filter to view structured tracing output in the CLI.
 
+### Prometheus metrics (optional)
+
+Build with the `metrics` feature to expose Prometheus counters and an HTTP `/metrics` endpoint:
+
+```bash
+cargo build -p txwatch-poller --features metrics
+```
+
+Three counters are registered:
+
+| Counter | Description |
+|---|---|
+| `txwatch_transactions_total` | Total Stellar transactions processed across all watched contracts |
+| `txwatch_alerts_total` | Total alert payloads sent (rules matched) |
+| `txwatch_webhook_failures_total` | Total permanent webhook delivery failures (after all retries) |
+
+To start the `/metrics` endpoint, call `txwatch_poller::serve_metrics(addr)` before `run_with`.
+The endpoint serves the standard Prometheus text exposition format and can be scraped by any
+Prometheus-compatible monitoring stack (Prometheus, Grafana Agent, VictoriaMetrics, etc.).
+
+Example scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: txwatch
+    static_configs:
+      - targets: ['localhost:9090']
+```
+
 ---
 
 ## How a transaction flows through TxWatch
