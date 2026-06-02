@@ -603,6 +603,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn horizon_429_returns_meaningful_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex("/accounts/.*/transactions"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let contract_id = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let mut cursors: HashMap<String, String> = HashMap::new();
+        cursors.insert(contract_id.to_string(), "now".to_string());
+
+        let contract = WatchedContract {
+            label: "test".into(),
+            contract_id: contract_id.into(),
+            network: Network::Testnet,
+            webhook_url: "https://hooks.example.com/test".into(),
+            webhook_secret: None,
+            horizon_base_url_override: Some(server.uri()),
+        };
+
+        // 429 is handled with a back-off and returns Ok((0,0)), not an error
+        let result = poll_contract(&client, &contract, &mut cursors).await;
+        assert!(result.is_ok(), "429 should return Ok after back-off");
+        assert_eq!(result.unwrap(), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn horizon_503_error_contains_status_code() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex("/accounts/.*/transactions"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let contract_id = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let mut cursors: HashMap<String, String> = HashMap::new();
+        cursors.insert(contract_id.to_string(), "now".to_string());
+
+        let contract = WatchedContract {
+            label: "test".into(),
+            contract_id: contract_id.into(),
+            network: Network::Testnet,
+            webhook_url: "https://hooks.example.com/test".into(),
+            webhook_secret: None,
+            horizon_base_url_override: Some(server.uri()),
+        };
+
+        let err = poll_contract(&client, &contract, &mut cursors).await.unwrap_err();
+            err.to_string().contains("503"),
+            "error must contain HTTP status 503, got: {}", err
+        );
+    }
+
+    #[tokio::test]
     async fn poll_contract_does_not_advance_cursor_on_fetch_failure() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))

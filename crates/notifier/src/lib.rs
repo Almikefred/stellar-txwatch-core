@@ -62,7 +62,11 @@ pub async fn send_webhook(
             .header("X-TxWatch-Version", env!("CARGO_PKG_VERSION"))
             .body(body.clone());
         if let Some(s) = secret {
-            req = req.header("X-TxWatch-Secret", s);
+            let mut mac = Hmac::<Sha256>::new_from_slice(s.as_bytes())
+                .expect("HMAC accepts any key length");
+            mac.update(body.as_bytes());
+            let sig = hex::encode(mac.finalize().into_bytes());
+            req = req.header("X-TxWatch-Signature", format!("sha256={}", sig));
         }
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
@@ -171,6 +175,8 @@ pub fn test_payload_with_network(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -286,7 +292,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn secret_header_present_when_provided() {
+    async fn signature_header_present_when_provided() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/hook"))
@@ -305,7 +311,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn secret_header_absent_when_not_provided() {
+    async fn signature_header_absent_when_not_provided() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/hook"))
@@ -320,6 +326,32 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
         assert!(!requests[0].headers.contains_key("x-txwatch-secret"));
+    }
+
+    #[tokio::test]
+    async fn signature_header_is_correct_hmac() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let payload = sample_payload();
+        let body = serde_json::to_string(&payload).unwrap();
+        let secret = "test-secret";
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body.as_bytes());
+        let expected = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+
+        let client = build_client().unwrap();
+        let url = format!("{}/hook", server.uri());
+        send_webhook(&client, &url, &payload, Some(secret)).await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let sig = requests[0].headers.get("x-txwatch-signature").unwrap();
+        assert_eq!(sig, &expected);
     }
 
     #[tokio::test]
