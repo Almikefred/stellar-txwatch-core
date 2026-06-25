@@ -7,7 +7,32 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 use txwatch_config::AlertRule;
+
+// ── RuleContext ────────────────────────────────────────────────────────────────
+
+/// Per-rule state for stateful alert rules (e.g., MultipleFailuresInWindow).
+/// Holds a ring buffer of recent failure timestamps per rule instance.
+#[derive(Debug, Clone)]
+pub struct RuleContext {
+    /// Recent failure timestamps; oldest entries are at the front.
+    pub failure_timestamps: Vec<Instant>,
+}
+
+impl RuleContext {
+    pub fn new() -> Self {
+        Self {
+            failure_timestamps: Vec::new(),
+        }
+    }
+}
+
+impl Default for RuleContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -135,6 +160,7 @@ pub fn evaluate(
     explorer_base: &str,
     rules: &[AlertRule],
     tx: &EnrichedTransaction,
+    rule_contexts: &mut [RuleContext],
 ) -> Vec<AlertPayload> {
     let horizon_link  = format!("{}/transactions/{}", horizon_base, tx.hash);
     let explorer_link = format!("{}/tx/{}", explorer_base, tx.hash);
@@ -143,32 +169,36 @@ pub fn evaluate(
 
     rules
         .iter()
-        .filter_map(|rule| match eval_rule(rule, tx) {
-            Ok(true) => Some(AlertPayload {
-                label: label.to_string(),
-                contract_id: contract_id.to_string(),
-                network: network.to_string(),
-                rule_type: rule_type(rule),
-                rule_triggered: rule_label(rule),
-                transaction_hash: tx.hash.clone(),
-                function_name: tx.function_names.first().cloned(),
-                function_names: tx.function_names.clone(),
-                amount_xlm: tx.amount_stroops.map(|s| s / 10_000_000),
-                fee_charged_stroops: tx.fee_charged_stroops,
-                timestamp,
-                timestamp_iso: timestamp_iso.clone(),
-                horizon_link: horizon_link.clone(),
-                explorer_link: explorer_link.clone(),
-            }),
-            Ok(false) => None,
-            Err(e) => {
-                tracing::warn!(
-                    tx = %tx.hash,
-                    rule = %rule_label(rule),
-                    error = %e,
-                    "rule evaluation error — skipping"
-                );
-                None
+        .enumerate()
+        .filter_map(|(idx, rule)| {
+            let ctx = rule_contexts.get_mut(idx);
+            match eval_rule(rule, tx, ctx) {
+                Ok(true) => Some(AlertPayload {
+                    label: label.to_string(),
+                    contract_id: contract_id.to_string(),
+                    network: network.to_string(),
+                    rule_type: rule_type(rule),
+                    rule_triggered: rule_label(rule),
+                    transaction_hash: tx.hash.clone(),
+                    function_name: tx.function_names.first().cloned(),
+                    function_names: tx.function_names.clone(),
+                    amount_xlm: tx.amount_stroops.map(|s| s / 10_000_000),
+                    fee_charged_stroops: tx.fee_charged_stroops,
+                    timestamp,
+                    timestamp_iso: timestamp_iso.clone(),
+                    horizon_link: horizon_link.clone(),
+                    explorer_link: explorer_link.clone(),
+                }),
+                Ok(false) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        tx = %tx.hash,
+                        rule = %rule_label(rule),
+                        error = %e,
+                        "rule evaluation error — skipping"
+                    );
+                    None
+                }
             }
         })
         .collect()
@@ -177,7 +207,7 @@ pub fn evaluate(
 // NOTE: When adding a new AlertRule variant, update both `eval_rule()` and
 // `rule_label()` together. Rust's exhaustive matching catches missing arms,
 // but this convention should be preserved for new rule variants.
-fn eval_rule(rule: &AlertRule, tx: &EnrichedTransaction) -> Result<bool> {
+fn eval_rule(rule: &AlertRule, tx: &EnrichedTransaction, ctx: Option<&mut RuleContext>) -> Result<bool> {
     Ok(match rule {
         AlertRule::AnyTransaction => true,
 
@@ -211,6 +241,24 @@ fn eval_rule(rule: &AlertRule, tx: &EnrichedTransaction) -> Result<bool> {
             .unwrap_or(false),
 
         AlertRule::OperationCountExceeds { max_operations } => tx.operation_count > *max_operations,
+
+        AlertRule::MultipleFailuresInWindow { failure_count, window_seconds } => {
+            let Some(context) = ctx else { return Ok(false); };
+
+            if !tx.successful {
+                context.failure_timestamps.push(Instant::now());
+            }
+
+            let cutoff = Instant::now() - std::time::Duration::from_secs(*window_seconds);
+            context.failure_timestamps.retain(|t| *t >= cutoff);
+
+            if context.failure_timestamps.len() >= *failure_count {
+                context.failure_timestamps.clear();
+                true
+            } else {
+                false
+            }
+        }
     })
 }
 
@@ -238,6 +286,9 @@ fn rule_label(rule: &AlertRule) -> String {
         AlertRule::OperationCountExceeds { max_operations } => {
             format!("OperationCountExceeds(>{})", max_operations)
         }
+        AlertRule::MultipleFailuresInWindow { failure_count, window_seconds } => {
+            format!("MultipleFailuresInWindow({}in{}s)", failure_count, window_seconds)
+        }
     }
 }
 
@@ -250,6 +301,7 @@ fn rule_type(rule: &AlertRule) -> String {
         AlertRule::AdminFunctionCalled { .. } => "AdminFunctionCalled".into(),
         AlertRule::HighFee { .. } => "HighFee".into(),
         AlertRule::OperationCountExceeds { .. } => "OperationCountExceeds".into(),
+        AlertRule::MultipleFailuresInWindow { .. } => "MultipleFailuresInWindow".into(),
     }
 }
 
@@ -290,6 +342,7 @@ mod tests {
     }
 
     fn run(rules: &[AlertRule], tx: &EnrichedTransaction) -> Vec<AlertPayload> {
+        let mut rule_contexts = vec![RuleContext::new(); rules.len()];
         evaluate(
             "Label",
             "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -298,6 +351,7 @@ mod tests {
             "https://stellar.expert/explorer/testnet",
             rules,
             tx,
+            &mut rule_contexts,
         )
     }
 
@@ -501,10 +555,12 @@ mod tests {
                 fee_charged_stroops: None,
                 operation_count: 0,
             };
+            let mut rule_contexts = vec![RuleContext::new()];
             let mut payloads = evaluate(
                 "L", "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
                 "testnet", horizon_base, explorer_base,
                 &[AlertRule::AnyTransaction], &tx,
+                &mut rule_contexts,
             );
             payloads.remove(0)
         }
@@ -738,5 +794,87 @@ mod tests {
         // This test shouldn't happen in practice (validation rejects max_operations=0)
         // but we verify the logic: 1 > 0 => true
         assert_eq!(payloads.len(), 1);
+    }
+
+    #[test]
+    fn multiple_failures_in_window_does_not_fire_below_threshold() {
+        let tx = make_tx(false, &[], None);
+        let mut rule_contexts = vec![RuleContext::new()];
+        let rules = &[AlertRule::MultipleFailuresInWindow {
+            failure_count: 3,
+            window_seconds: 60,
+        }];
+        evaluate(
+            "Label",
+            "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "testnet",
+            "https://horizon-testnet.stellar.org",
+            "https://stellar.expert/explorer/testnet",
+            rules,
+            &tx,
+            &mut rule_contexts,
+        );
+        assert!(rule_contexts[0].failure_timestamps.len() < 3);
+    }
+
+    #[test]
+    fn multiple_failures_in_window_fires_at_threshold() {
+        let tx = make_tx(false, &[], None);
+        let mut rule_contexts = vec![RuleContext::new()];
+        let rules = &[AlertRule::MultipleFailuresInWindow {
+            failure_count: 3,
+            window_seconds: 60,
+        }];
+
+        for _ in 0..3 {
+            evaluate(
+                "Label",
+                "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "testnet",
+                "https://horizon-testnet.stellar.org",
+                "https://stellar.expert/explorer/testnet",
+                rules,
+                &tx,
+                &mut rule_contexts,
+            );
+        }
+
+        let payloads = evaluate(
+            "Label",
+            "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "testnet",
+            "https://horizon-testnet.stellar.org",
+            "https://stellar.expert/explorer/testnet",
+            rules,
+            &tx,
+            &mut rule_contexts,
+        );
+
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(rule_contexts[0].failure_timestamps.len(), 0);
+    }
+
+    #[test]
+    fn multiple_failures_in_window_does_not_fire_on_success() {
+        let tx = make_tx(true, &[], None);
+        let mut rule_contexts = vec![RuleContext::new()];
+        let rules = &[AlertRule::MultipleFailuresInWindow {
+            failure_count: 1,
+            window_seconds: 60,
+        }];
+
+        let payloads = evaluate(
+            "Label",
+            "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "testnet",
+            "https://horizon-testnet.stellar.org",
+            "https://stellar.expert/explorer/testnet",
+            rules,
+            &tx,
+            &mut rule_contexts,
+        );
+
+        assert!(payloads.is_empty());
+        assert!(rule_contexts[0].failure_timestamps.is_empty());
     }
 }

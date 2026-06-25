@@ -108,6 +108,28 @@ type            = "OperationCountExceeds"
 max_operations  = 5
 ```
 
+### `MultipleFailuresInWindow`
+
+| Field            | Type | Required | Description                       |
+|------------------|------|----------|-----------------------------------|
+| `failure_count`  | u64  | yes      | Number of failures to trigger (≥ 1) |
+| `window_seconds` | u64  | yes      | Time window in seconds (> 0)      |
+
+**Stateful rule:** Fires when a contract experiences `failure_count` failed transactions
+within `window_seconds`. After firing, the failure counter resets. Failed transactions
+(where `successful = false`) are tracked; other transactions are ignored.
+
+**Use case:** alert on sudden bursts of transaction failures or repeated errors.
+
+**Memory:** Maintains a sliding window of up to `failure_count` recent failure timestamps per rule instance.
+
+```toml
+[[contracts.rules]]
+type             = "MultipleFailuresInWindow"
+failure_count    = 3
+window_seconds   = 300
+```
+
 ## Evaluation order
 
 Rules are evaluated in the order they appear in the config file.
@@ -150,6 +172,7 @@ The webhook payload includes two rule-related fields:
 | `AdminFunctionCalled` | `"AdminFunctionCalled"` |
 | `HighFee` | `"HighFee"` |
 | `OperationCountExceeds` | `"OperationCountExceeds"` |
+| `MultipleFailuresInWindow` | `"MultipleFailuresInWindow"` |
 
 ## Adding a new rule type
 

@@ -251,6 +251,9 @@ async fn poll_contract(
         .unwrap_or_else(|| contract.network.horizon_base_url());
     let canonical_base = contract.network.horizon_base_url();
 
+    // Initialize rule contexts for stateful rules (e.g., MultipleFailuresInWindow).
+    let mut rule_contexts = vec![txwatch_rules::RuleContext::new(); contract.rules.len()];
+
     // Collect all pages of transactions.
     let mut all_records: Vec<HorizonTransactionWithOps> = Vec::new();
     let mut page_cursor = cursor.clone();
@@ -363,6 +366,7 @@ async fn poll_contract(
             contract.network.explorer_base_url(),
             &contract.rules,
             &enriched,
+            &mut rule_contexts,
         );
 
         if payloads.is_empty() {

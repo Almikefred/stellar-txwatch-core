@@ -81,6 +81,7 @@ pub enum AlertRule {
         threshold_xlm: Option<u64>,
     },
     OperationCountExceeds { max_operations: usize },
+    MultipleFailuresInWindow { failure_count: usize, window_seconds: u64 },
 }
 
 impl AlertRule {
@@ -161,6 +162,20 @@ impl AlertRule {
                     );
                 }
             }
+            AlertRule::MultipleFailuresInWindow { failure_count, window_seconds } => {
+                if *failure_count < 1 {
+                    bail!(
+                        "contract '{}': MultipleFailuresInWindow failure_count must be >= 1",
+                        contract_label
+                    );
+                }
+                if *window_seconds == 0 {
+                    bail!(
+                        "contract '{}': MultipleFailuresInWindow window_seconds must be > 0",
+                        contract_label
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -186,6 +201,9 @@ impl AlertRule {
             }
             AlertRule::OperationCountExceeds { max_operations } => {
                 format!("OperationCountExceeds(>{})", max_operations)
+            }
+            AlertRule::MultipleFailuresInWindow { failure_count, window_seconds } => {
+                format!("MultipleFailuresInWindow({}in{}s)", failure_count, window_seconds)
             }
         }
     }}
@@ -698,6 +716,36 @@ mod tests {
     fn accepts_operation_count_exceeds_with_positive_max_operations() {
         let mut c = valid_contract();
         c.rules = vec![AlertRule::OperationCountExceeds { max_operations: 5 }];
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_multiple_failures_in_window_with_zero_failure_count() {
+        let mut c = valid_contract();
+        c.rules = vec![AlertRule::MultipleFailuresInWindow {
+            failure_count: 0,
+            window_seconds: 60,
+        }];
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_multiple_failures_in_window_with_zero_window() {
+        let mut c = valid_contract();
+        c.rules = vec![AlertRule::MultipleFailuresInWindow {
+            failure_count: 2,
+            window_seconds: 0,
+        }];
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_multiple_failures_in_window_with_valid_params() {
+        let mut c = valid_contract();
+        c.rules = vec![AlertRule::MultipleFailuresInWindow {
+            failure_count: 2,
+            window_seconds: 60,
+        }];
         assert!(c.validate().is_ok());
     }
 }
