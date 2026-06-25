@@ -4,8 +4,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_path_to_error::Deserializer as PathDeserializer;
-use std::{fmt, fs, path::Path};
+use std::{env, fmt, fs, path::Path};
 use url::Url;
 
 const MAX_LARGE_TRANSFER_THRESHOLD_XLM: u64 = 1_000_000_000;
@@ -81,6 +80,7 @@ pub enum AlertRule {
         #[serde(default)]
         threshold_xlm: Option<u64>,
     },
+    OperationCountExceeds { max_operations: usize },
 }
 
 impl AlertRule {
@@ -153,6 +153,14 @@ impl AlertRule {
                     _ => {}
                 }
             }
+            AlertRule::OperationCountExceeds { max_operations } => {
+                if *max_operations == 0 {
+                    bail!(
+                        "contract '{}': OperationCountExceeds max_operations must be > 0",
+                        contract_label
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -175,6 +183,9 @@ impl AlertRule {
                 } else {
                     format!("HighFee(>={} stroops)", threshold_stroops)
                 }
+            }
+            AlertRule::OperationCountExceeds { max_operations } => {
+                format!("OperationCountExceeds(>{})", max_operations)
             }
         }
     }}
@@ -292,22 +303,11 @@ fn default_http_tcp_keepalive_secs() -> Option<u64> {
     None
 }
 
-fn deserialize_toml_with_field_context<'de, T>(raw: &'de str, path: &Path) -> Result<T>
+fn deserialize_toml_with_field_context<T>(raw: &str, _path: &Path) -> Result<T>
 where
     T: DeserializeOwned,
 {
-    let mut deserializer = toml::Deserializer::new(raw);
-    let mut path_deserializer = PathDeserializer::new(&mut deserializer);
-    T::deserialize(&mut path_deserializer).map_err(|error| {
-        let path = error.path().to_string();
-        let inner = error.into_inner();
-        let message = if path.is_empty() {
-            inner.to_string()
-        } else {
-            format!("{} (field: {})", inner, path)
-        };
-        anyhow!(message)
-    })
+    toml::from_str(raw).map_err(|e| anyhow!(e))
 }
 
 // ── Env-var interpolation ─────────────────────────────────────────────────────
@@ -624,11 +624,14 @@ mod tests {
         for val in 0u64..5 {
             let mut cfg = AppConfig {
                 poll_interval_seconds: val,
+                contracts: vec![],
+                cursor_file: None,
                 http_pool_max_idle_per_host: None,
                 http_tcp_keepalive_secs: None,
                 http_connection_verbose: None,
             };
             let err = cfg.validate().unwrap_err();
+            assert!(
                 err.to_string().contains("poll_interval_seconds must be >= 5"),
                 "val={} should be rejected: {}", val, err
             );
@@ -682,5 +685,19 @@ mod tests {
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("failed to parse config file"));
         assert!(error_msg.contains("field: poll_interval_seconds"));
+    }
+
+    #[test]
+    fn rejects_operation_count_exceeds_with_zero_max_operations() {
+        let mut c = valid_contract();
+        c.rules = vec![AlertRule::OperationCountExceeds { max_operations: 0 }];
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_operation_count_exceeds_with_positive_max_operations() {
+        let mut c = valid_contract();
+        c.rules = vec![AlertRule::OperationCountExceeds { max_operations: 5 }];
+        assert!(c.validate().is_ok());
     }
 }

@@ -11,7 +11,6 @@ use std::{
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::Deserialize;
-use serde_json;
 use std::fs;
 use tracing::{debug, error, info, warn};
 use txwatch_config::{AppConfig, WatchedContract};
@@ -217,9 +216,6 @@ pub async fn run_with(cfg: AppConfig, dry_run: bool) -> Result<()> {
         }
         tokio::time::sleep(interval).await;
     }
-
-    info!("TxWatch polling engine stopped cleanly");
-    Ok(())
 }
 
 // ── Per-contract poll ─────────────────────────────────────────────────────────
@@ -332,7 +328,7 @@ async fn poll_contract(
 
         // Issue #23: if Horizon returned inline operations, use them directly.
         // Otherwise fall back to a separate /operations fetch.
-        let (function_names, amount_stroops) = if !record.operations.is_empty() {
+        let (function_names, amount_stroops, operation_count) = if !record.operations.is_empty() {
             debug!(contract = %contract.label, tx = %tx_hash, "using inline operations (join=operations)");
             extract_soroban_details(record.operations)
         } else {
@@ -343,12 +339,12 @@ async fn poll_contract(
                         contract = %contract.label, tx = %tx_hash, error = %e,
                         "could not fetch operation details — evaluating rules without them"
                     );
-                    (Vec::new(), None)
+                    (Vec::new(), None, 0)
                 }
             }
         };
 
-        let enriched = match EnrichedTransaction::from_horizon(record.tx, function_names, amount_stroops, None) {
+        let enriched = match EnrichedTransaction::from_horizon(record.tx, function_names, amount_stroops, None, operation_count) {
             Ok(t) => t,
             Err(e) => {
                 warn!(contract = %contract.label, tx = %tx_hash, error = %e,
@@ -409,10 +405,11 @@ async fn poll_contract(
 
 /// Extract Soroban details from a slice of already-fetched operations.
 /// Used for both inline (join=operations) and separately-fetched operations.
-fn extract_soroban_details(ops: Vec<HorizonOperation>) -> (Vec<String>, Option<u64>) {
+fn extract_soroban_details(ops: Vec<HorizonOperation>) -> (Vec<String>, Option<u64>, usize) {
     let mut function_names: Vec<String> = Vec::new();
     let mut total_stroops: u64 = 0;
     let mut has_payment = false;
+    let operation_count = ops.len();
 
     for op in ops {
         if op.op_type == "invoke_host_function" {
@@ -430,7 +427,7 @@ fn extract_soroban_details(ops: Vec<HorizonOperation>) -> (Vec<String>, Option<u
         }
     }
 
-    (function_names, if has_payment { Some(total_stroops) } else { None })
+    (function_names, if has_payment { Some(total_stroops) } else { None }, operation_count)
 }
 
 /// Fetch operations for a single transaction from Horizon.
@@ -440,7 +437,7 @@ async fn fetch_soroban_details(
     client:  &Client,
     base:    &str,
     tx_hash: &str,
-) -> Result<(Vec<String>, Option<u64>)> {
+) -> Result<(Vec<String>, Option<u64>, usize)> {
     let url = format!("{}/transactions/{}/operations", base, tx_hash);
 
     let page: OperationsPage = client
@@ -591,11 +588,12 @@ mod tests {
             .await;
 
         let client = Client::new();
-        let (fn_names, amount) =
+        let (fn_names, amount, op_count) =
             fetch_soroban_details(&client, &server.uri(), "abc123").await.unwrap();
 
         assert_eq!(fn_names, vec!["withdraw"]);
         assert!(amount.is_none());
+        assert_eq!(op_count, 1);
     }
 
     #[tokio::test]
@@ -611,11 +609,12 @@ mod tests {
             .await;
 
         let client = Client::new();
-        let (fn_names, amount) =
+        let (fn_names, amount, op_count) =
             fetch_soroban_details(&client, &server.uri(), "abc123").await.unwrap();
 
         assert!(fn_names.is_empty());
         assert_eq!(amount, Some(10_000_000_000));
+        assert_eq!(op_count, 1);
     }
 
     #[tokio::test]
@@ -629,11 +628,12 @@ mod tests {
             .await;
 
         let client = Client::new();
-        let (fn_names, amount) =
+        let (fn_names, amount, op_count) =
             fetch_soroban_details(&client, &server.uri(), "abc123").await.unwrap();
 
         assert!(fn_names.is_empty());
         assert!(amount.is_none());
+        assert_eq!(op_count, 0);
     }
 
     #[tokio::test]
@@ -688,7 +688,8 @@ mod tests {
             horizon_base_url_override: Some(server.uri()),
         };
 
-        let err = poll_contract(&client, &contract, &mut cursors).await.unwrap_err();
+        let err = poll_contract(&client, &contract, &mut cursors, false).await.unwrap_err();
+        assert!(
             err.to_string().contains("503"),
             "error must contain HTTP status 503, got: {}", err
         );

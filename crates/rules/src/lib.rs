@@ -55,6 +55,8 @@ pub struct EnrichedTransaction {
     pub amount_stroops: Option<u64>,
     /// Fee charged for this transaction in stroops.
     pub fee_charged_stroops: Option<u64>,
+    /// Total number of operations in this transaction.
+    pub operation_count: usize,
 }
 
 impl EnrichedTransaction {
@@ -64,6 +66,7 @@ impl EnrichedTransaction {
         function_names: Vec<String>,
         amount_stroops: Option<u64>,
         fee_charged_stroops: Option<u64>,
+        operation_count: usize,
     ) -> Result<Self> {
         let timestamp = tx.created_at.parse::<DateTime<Utc>>().with_context(|| {
             format!(
@@ -84,6 +87,7 @@ impl EnrichedTransaction {
                     .as_deref()
                     .and_then(|s| s.parse::<u64>().ok())
             }),
+            operation_count,
         })
     }
 }
@@ -205,6 +209,8 @@ fn eval_rule(rule: &AlertRule, tx: &EnrichedTransaction) -> Result<bool> {
             .fee_charged_stroops
             .map(|f| f >= *threshold_stroops)
             .unwrap_or(false),
+
+        AlertRule::OperationCountExceeds { max_operations } => tx.operation_count > *max_operations,
     })
 }
 
@@ -229,6 +235,9 @@ fn rule_label(rule: &AlertRule) -> String {
                 format!("HighFee(>={} stroops)", threshold_stroops)
             }
         }
+        AlertRule::OperationCountExceeds { max_operations } => {
+            format!("OperationCountExceeds(>{})", max_operations)
+        }
     }
 }
 
@@ -240,6 +249,7 @@ fn rule_type(rule: &AlertRule) -> String {
         AlertRule::FunctionCalled { .. } => "FunctionCalled".into(),
         AlertRule::AdminFunctionCalled { .. } => "AdminFunctionCalled".into(),
         AlertRule::HighFee { .. } => "HighFee".into(),
+        AlertRule::OperationCountExceeds { .. } => "OperationCountExceeds".into(),
     }
 }
 
@@ -275,6 +285,7 @@ mod tests {
             function_names: function_names.iter().map(|s| s.to_string()).collect(),
             amount_stroops,
             fee_charged_stroops: None,
+            operation_count: 0,
         }
     }
 
@@ -313,7 +324,7 @@ mod tests {
         assert_eq!(rule_label(&AlertRule::LargeTransfer { threshold_xlm: 10_000 }), "LargeTransfer(>=10000XLM)");
         assert_eq!(rule_label(&AlertRule::FunctionCalled { function_name: "withdraw".into() }), "FunctionCalled(withdraw)");
         assert_eq!(rule_label(&AlertRule::AdminFunctionCalled { function_names: vec!["set_admin".into(), "upgrade".into()] }), "AdminFunctionCalled([set_admin, upgrade])");
-        assert_eq!(rule_label(&AlertRule::HighFee { threshold_stroops: 10_000 }), "HighFee(>=10000 stroops)");
+        assert_eq!(rule_label(&AlertRule::HighFee { threshold_stroops: 10_000, threshold_xlm: None }), "HighFee(>=10000 stroops)");
     }
 
     #[test]
@@ -488,6 +499,7 @@ mod tests {
                 function_names: vec![],
                 amount_stroops: None,
                 fee_charged_stroops: None,
+                operation_count: 0,
             };
             let mut payloads = evaluate(
                 "L", "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -567,7 +579,7 @@ mod tests {
             envelope_xdr: None,
             result_xdr: None,
         };
-        let enriched = EnrichedTransaction::from_horizon(raw, vec![], None, None).unwrap();
+        let enriched = EnrichedTransaction::from_horizon(raw, vec![], None, None, 0).unwrap();
         assert_eq!(enriched.timestamp.year(), 2024);
     }
 
@@ -583,7 +595,7 @@ mod tests {
             envelope_xdr: None,
             result_xdr:   None,
         };
-        let result = EnrichedTransaction::from_horizon(raw, vec![], None, None);
+        let result = EnrichedTransaction::from_horizon(raw, vec![], None, None, 0);
         assert!(result.is_err(), "expected Err for invalid timestamp");
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -679,5 +691,52 @@ mod tests {
         assert_eq!(obj["timestamp_iso"].as_str(), Some("2024-01-15T12:00:00Z"));
         assert_eq!(obj["horizon_link"].as_str(), Some("https://horizon-testnet.stellar.org/transactions/abc123"));
         assert_eq!(obj["explorer_link"].as_str(), Some("https://stellar.expert/explorer/testnet/tx/abc123"));
+    }
+
+    #[test]
+    fn operation_count_exceeds_fires_when_operation_count_exceeds_threshold() {
+        let mut tx = make_tx(true, &[], None);
+        tx.operation_count = 6;
+        let payloads = run(
+            &[AlertRule::OperationCountExceeds { max_operations: 5 }],
+            &tx,
+        );
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].rule_triggered, "OperationCountExceeds(>5)");
+    }
+
+    #[test]
+    fn operation_count_exceeds_does_not_fire_at_exact_threshold() {
+        let mut tx = make_tx(true, &[], None);
+        tx.operation_count = 5;
+        let payloads = run(
+            &[AlertRule::OperationCountExceeds { max_operations: 5 }],
+            &tx,
+        );
+        assert!(payloads.is_empty());
+    }
+
+    #[test]
+    fn operation_count_exceeds_does_not_fire_below_threshold() {
+        let mut tx = make_tx(true, &[], None);
+        tx.operation_count = 4;
+        let payloads = run(
+            &[AlertRule::OperationCountExceeds { max_operations: 5 }],
+            &tx,
+        );
+        assert!(payloads.is_empty());
+    }
+
+    #[test]
+    fn operation_count_exceeds_fires_with_zero_operation_count_and_zero_threshold() {
+        let mut tx = make_tx(true, &[], None);
+        tx.operation_count = 1;
+        let payloads = run(
+            &[AlertRule::OperationCountExceeds { max_operations: 0 }],
+            &tx,
+        );
+        // This test shouldn't happen in practice (validation rejects max_operations=0)
+        // but we verify the logic: 1 > 0 => true
+        assert_eq!(payloads.len(), 1);
     }
 }

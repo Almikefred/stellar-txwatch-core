@@ -91,6 +91,23 @@ type               = "HighFee"
 threshold_stroops  = 100000
 ```
 
+### `OperationCountExceeds`
+
+| Field             | Type | Required | Description                    |
+|-------------------|------|----------|--------------------------------|
+| `max_operations`  | u64  | yes      | Operation threshold (> 0)      |
+
+Matches when the transaction contains more than `max_operations` operations.
+The rule fires only when `operation_count > max_operations` (strict greater-than).
+
+**Use case:** detect complex multi-step transactions or potential attack patterns.
+
+```toml
+[[contracts.rules]]
+type            = "OperationCountExceeds"
+max_operations  = 5
+```
+
 ## Evaluation order
 
 Rules are evaluated in the order they appear in the config file.
@@ -132,6 +149,7 @@ The webhook payload includes two rule-related fields:
 | `FunctionCalled` | `"FunctionCalled"` |
 | `AdminFunctionCalled` | `"AdminFunctionCalled"` |
 | `HighFee` | `"HighFee"` |
+| `OperationCountExceeds` | `"OperationCountExceeds"` |
 
 ## Adding a new rule type
 
