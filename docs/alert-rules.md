@@ -130,6 +130,60 @@ failure_count    = 3
 window_seconds   = 300
 ```
 
+## Time Window Filter
+
+| Field        | Type | Required | Description                 |
+|--------------|------|----------|-----------------------------|
+| `start_hour` | u8   | no       | Start hour (UTC, 0-23)      |
+| `end_hour`   | u8   | no       | End hour (UTC, 0-23)        |
+
+Restricts any rule's evaluation to a specific UTC hour window. Rules with a time window defined
+will only fire during `[start_hour, end_hour)` in UTC. If `start_hour >= end_hour`, the window
+is invalid and validation will fail.
+
+**Use case:** reduce alert noise outside business hours, defer sensitive operations to off-hours.
+
+**Note:** The time window is evaluated at the UTC hour level. A rule fires only if the current
+UTC hour `h` satisfies `h >= start_hour && h < end_hour`.
+
+```toml
+[[contracts.rules]]
+type          = "FunctionCalled"
+function_name = "withdraw"
+start_hour    = 9
+end_hour      = 17
+```
+
+This rule fires for `withdraw` calls only between 09:00 and 16:59 UTC.
+
+### `FunctionNamePattern`
+
+| Field     | Type   | Required | Description                              |
+|-----------|--------|----------|------------------------------------------|
+| `pattern` | string | yes      | Glob or regex pattern for function names |
+| `mode`    | string | yes      | Pattern mode: `glob` or `regex`          |
+
+Matches when any invoked Soroban function matches the provided pattern in the specified mode.
+
+**Use case:** match function names by prefix/suffix (glob) or complex patterns (regex).
+
+**Glob examples:**
+- `set_*` matches `set_admin`, `set_fee`, `set_threshold`, etc.
+- `*_v2` matches `init_v2`, `execute_v2`, etc.
+- `?fetch*` matches `prefetch_`, `isfetch_anything`, etc.
+
+**Regex examples:**
+- `set_.*` matches any function starting with `set_`
+- `(init|execute)` matches either `init` or `execute`
+- `.*_v[0-9]+` matches versioned function names like `foo_v1`, `bar_v2`
+
+```toml
+[[contracts.rules]]
+type    = "FunctionNamePattern"
+pattern = "set_*"
+mode    = "glob"
+```
+
 ## Evaluation order
 
 Rules are evaluated in the order they appear in the config file.
@@ -173,6 +227,7 @@ The webhook payload includes two rule-related fields:
 | `HighFee` | `"HighFee"` |
 | `OperationCountExceeds` | `"OperationCountExceeds"` |
 | `MultipleFailuresInWindow` | `"MultipleFailuresInWindow"` |
+| `FunctionNamePattern` | `"FunctionNamePattern"` |
 
 ## Adding a new rule type
 

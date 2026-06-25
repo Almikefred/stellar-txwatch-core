@@ -9,6 +9,14 @@ use url::Url;
 
 const MAX_LARGE_TRANSFER_THRESHOLD_XLM: u64 = 1_000_000_000;
 
+// ── TimeWindow ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TimeWindow {
+    pub start_hour: u8,
+    pub end_hour: u8,
+}
+
 // ── Network ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -61,16 +69,46 @@ impl fmt::Display for Network {
     }
 }
 
+// ── PatternMode ───────────────────────────────────────────────────────────────
+
+/// Pattern matching mode for function names.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PatternMode {
+    /// Glob pattern (e.g., "set_*", "*_admin")
+    Glob,
+    /// Regex pattern (e.g., "set_.*", ".*_admin")
+    Regex,
+}
+
 // ── AlertRule ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type")]
 pub enum AlertRule {
-    AnyTransaction,
-    TransactionFailed,
-    LargeTransfer       { threshold_xlm: u64 },
-    FunctionCalled      { function_name: String },
-    AdminFunctionCalled { function_names: Vec<String> },
+    AnyTransaction {
+        #[serde(default)]
+        time_window: Option<TimeWindow>,
+    },
+    TransactionFailed {
+        #[serde(default)]
+        time_window: Option<TimeWindow>,
+    },
+    LargeTransfer {
+        threshold_xlm: u64,
+        #[serde(default)]
+        time_window: Option<TimeWindow>,
+    },
+    FunctionCalled {
+        function_name: String,
+        #[serde(default)]
+        time_window: Option<TimeWindow>,
+    },
+    AdminFunctionCalled {
+        function_names: Vec<String>,
+        #[serde(default)]
+        time_window: Option<TimeWindow>,
+    },
     /// Fires when the transaction's fee exceeds the threshold.
     /// Specify either `threshold_stroops` (raw stroops) or `threshold_xlm` (whole XLM,
     /// converted to stroops during validation); the two are mutually exclusive.
@@ -79,15 +117,56 @@ pub enum AlertRule {
         threshold_stroops: u64,
         #[serde(default)]
         threshold_xlm: Option<u64>,
+        #[serde(default)]
+        time_window: Option<TimeWindow>,
     },
-    OperationCountExceeds { max_operations: usize },
-    MultipleFailuresInWindow { failure_count: usize, window_seconds: u64 },
+    OperationCountExceeds {
+        max_operations: usize,
+        #[serde(default)]
+        time_window: Option<TimeWindow>,
+    },
+    MultipleFailuresInWindow {
+        failure_count: usize,
+        window_seconds: u64,
+        #[serde(default)]
+        time_window: Option<TimeWindow>,
+    },
+    FunctionNamePattern {
+        pattern: String,
+        mode: PatternMode,
+        #[serde(default)]
+        time_window: Option<TimeWindow>,
+    },
 }
 
 impl AlertRule {
     pub fn validate(&mut self, contract_label: &str) -> Result<()> {
+        // Validate time_window if present
+        let time_window = self.time_window();
+        if let Some(tw) = time_window {
+            if tw.start_hour > 23 {
+                bail!(
+                    "contract '{}': time_window start_hour must be 0..=23",
+                    contract_label
+                );
+            }
+            if tw.end_hour > 23 {
+                bail!(
+                    "contract '{}': time_window end_hour must be 0..=23",
+                    contract_label
+                );
+            }
+            if tw.start_hour >= tw.end_hour {
+                bail!(
+                    "contract '{}': time_window start_hour must be < end_hour",
+                    contract_label
+                );
+            }
+        }
+
         match self {
-            AlertRule::LargeTransfer { threshold_xlm } => {
+            AlertRule::AnyTransaction { .. } | AlertRule::TransactionFailed { .. } => {}
+            AlertRule::LargeTransfer { threshold_xlm, .. } => {
                 if *threshold_xlm == 0 {
                     bail!(
                         "contract '{}': LargeTransfer threshold_xlm must be > 0",
@@ -102,7 +181,7 @@ impl AlertRule {
                     );
                 }
             }
-            AlertRule::FunctionCalled { function_name } => {
+            AlertRule::FunctionCalled { function_name, .. } => {
                 if function_name.trim().is_empty() {
                     bail!(
                         "contract '{}': FunctionCalled function_name must not be empty",
@@ -110,7 +189,7 @@ impl AlertRule {
                     );
                 }
             }
-            AlertRule::AdminFunctionCalled { function_names } => {
+            AlertRule::AdminFunctionCalled { function_names, .. } => {
                 if function_names.is_empty() {
                     bail!(
                         "contract '{}': AdminFunctionCalled function_names must not be empty",
@@ -128,7 +207,7 @@ impl AlertRule {
                 }
             }
             AlertRule::AnyTransaction | AlertRule::TransactionFailed => {}
-            AlertRule::HighFee { threshold_stroops, threshold_xlm } => {
+            AlertRule::HighFee { threshold_stroops, threshold_xlm, .. } => {
                 match (*threshold_xlm, *threshold_stroops) {
                     (Some(_), s) if s > 0 => bail!(
                         "contract '{}': HighFee: specify either threshold_stroops or \
@@ -154,7 +233,7 @@ impl AlertRule {
                     _ => {}
                 }
             }
-            AlertRule::OperationCountExceeds { max_operations } => {
+            AlertRule::OperationCountExceeds { max_operations, .. } => {
                 if *max_operations == 0 {
                     bail!(
                         "contract '{}': OperationCountExceeds max_operations must be > 0",
@@ -162,7 +241,7 @@ impl AlertRule {
                     );
                 }
             }
-            AlertRule::MultipleFailuresInWindow { failure_count, window_seconds } => {
+            AlertRule::MultipleFailuresInWindow { failure_count, window_seconds, .. } => {
                 if *failure_count < 1 {
                     bail!(
                         "contract '{}': MultipleFailuresInWindow failure_count must be >= 1",
@@ -176,37 +255,86 @@ impl AlertRule {
                     );
                 }
             }
+            AlertRule::FunctionNamePattern { pattern, mode, .. } => {
+                if pattern.trim().is_empty() {
+                    bail!(
+                        "contract '{}': FunctionNamePattern pattern must not be empty",
+                        contract_label
+                    );
+                }
+                match mode {
+                    PatternMode::Glob => {
+                        if let Err(_e) = glob::Pattern::new(pattern) {
+                            bail!(
+                                "contract '{}': FunctionNamePattern glob pattern is invalid: {}",
+                                contract_label,
+                                pattern
+                            );
+                        }
+                    }
+                    PatternMode::Regex => {
+                        if regex::Regex::new(pattern).is_err() {
+                            bail!(
+                                "contract '{}': FunctionNamePattern regex pattern is invalid: {}",
+                                contract_label,
+                                pattern
+                            );
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
+
+    fn time_window(&self) -> Option<&TimeWindow> {
+        match self {
+            Self::AnyTransaction { time_window, .. }
+            | Self::TransactionFailed { time_window, .. }
+            | Self::LargeTransfer { time_window, .. }
+            | Self::FunctionCalled { time_window, .. }
+            | Self::AdminFunctionCalled { time_window, .. }
+            | Self::HighFee { time_window, .. }
+            | Self::OperationCountExceeds { time_window, .. }
+            | Self::MultipleFailuresInWindow { time_window, .. }
+            | Self::FunctionNamePattern { time_window, .. } => time_window.as_ref(),
+        }
+    }
     pub fn label(&self) -> String {
         match self {
-            AlertRule::AnyTransaction => "AnyTransaction".into(),
-            AlertRule::TransactionFailed => "TransactionFailed".into(),
-            AlertRule::LargeTransfer { threshold_xlm } => {
+            AlertRule::AnyTransaction { .. } => "AnyTransaction".into(),
+            AlertRule::TransactionFailed { .. } => "TransactionFailed".into(),
+            AlertRule::LargeTransfer { threshold_xlm, .. } => {
                 format!("LargeTransfer(>={}XLM)", threshold_xlm)
             }
-            AlertRule::FunctionCalled { function_name } => {
+            AlertRule::FunctionCalled { function_name, .. } => {
                 format!("FunctionCalled({})", function_name)
             }
-            AlertRule::AdminFunctionCalled { function_names } => {
+            AlertRule::AdminFunctionCalled { function_names, .. } => {
                 format!("AdminFunctionCalled([{}])", function_names.join(", "))
             }
-            AlertRule::HighFee { threshold_stroops, threshold_xlm } => {
+            AlertRule::HighFee { threshold_stroops, threshold_xlm, .. } => {
                 if let Some(xlm) = threshold_xlm {
                     format!("HighFee(>={} XLM)", xlm)
                 } else {
                     format!("HighFee(>={} stroops)", threshold_stroops)
                 }
             }
-            AlertRule::OperationCountExceeds { max_operations } => {
+            AlertRule::OperationCountExceeds { max_operations, .. } => {
                 format!("OperationCountExceeds(>{})", max_operations)
             }
-            AlertRule::MultipleFailuresInWindow { failure_count, window_seconds } => {
+            AlertRule::MultipleFailuresInWindow { failure_count, window_seconds, .. } => {
                 format!("MultipleFailuresInWindow({}in{}s)", failure_count, window_seconds)
             }
+            AlertRule::FunctionNamePattern { pattern, mode, .. } => {
+                let mode_str = match mode {
+                    PatternMode::Glob => "glob",
+                    PatternMode::Regex => "regex",
+                };
+                format!("FunctionNamePattern({}:{})", mode_str, pattern)
+            }
         }
-    }}
+    }
 
 // ── WatchedContract ───────────────────────────────────────────────────────────
 

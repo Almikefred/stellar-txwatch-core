@@ -6,9 +6,11 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use glob::Pattern as GlobPattern;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-use txwatch_config::AlertRule;
+use txwatch_config::{AlertRule, PatternMode};
 
 // ── RuleContext ────────────────────────────────────────────────────────────────
 
@@ -167,10 +169,20 @@ pub fn evaluate(
     let timestamp = tx.timestamp.timestamp();
     let timestamp_iso = tx.timestamp.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
+    let now_utc = Utc::now();
+    let current_hour = now_utc.hour() as u8;
+
     rules
         .iter()
         .enumerate()
         .filter_map(|(idx, rule)| {
+            // Check time window filter
+            if let Some(tw) = rule.time_window() {
+                if current_hour < tw.start_hour || current_hour >= tw.end_hour {
+                    return None;
+                }
+            }
+
             let ctx = rule_contexts.get_mut(idx);
             match eval_rule(rule, tx, ctx) {
                 Ok(true) => Some(AlertPayload {
@@ -259,6 +271,27 @@ fn eval_rule(rule: &AlertRule, tx: &EnrichedTransaction, ctx: Option<&mut RuleCo
                 false
             }
         }
+
+        AlertRule::FunctionNamePattern { pattern, mode, .. } => {
+            tx.function_names.iter().any(|f| {
+                match mode {
+                    PatternMode::Glob => {
+                        if let Ok(glob_pat) = GlobPattern::new(pattern) {
+                            glob_pat.matches(f)
+                        } else {
+                            false
+                        }
+                    }
+                    PatternMode::Regex => {
+                        if let Ok(regex_pat) = Regex::new(pattern) {
+                            regex_pat.is_match(f)
+                        } else {
+                            false
+                        }
+                    }
+                }
+            })
+        }
     })
 }
 
@@ -289,6 +322,13 @@ fn rule_label(rule: &AlertRule) -> String {
         AlertRule::MultipleFailuresInWindow { failure_count, window_seconds } => {
             format!("MultipleFailuresInWindow({}in{}s)", failure_count, window_seconds)
         }
+        AlertRule::FunctionNamePattern { pattern, mode, .. } => {
+            let mode_str = match mode {
+                PatternMode::Glob => "glob",
+                PatternMode::Regex => "regex",
+            };
+            format!("FunctionNamePattern({}:{})", mode_str, pattern)
+        }
     }
 }
 
@@ -302,6 +342,7 @@ fn rule_type(rule: &AlertRule) -> String {
         AlertRule::HighFee { .. } => "HighFee".into(),
         AlertRule::OperationCountExceeds { .. } => "OperationCountExceeds".into(),
         AlertRule::MultipleFailuresInWindow { .. } => "MultipleFailuresInWindow".into(),
+        AlertRule::FunctionNamePattern { .. } => "FunctionNamePattern".into(),
     }
 }
 
@@ -876,5 +917,146 @@ mod tests {
 
         assert!(payloads.is_empty());
         assert!(rule_contexts[0].failure_timestamps.is_empty());
+    }
+
+    #[test]
+    fn time_window_rule_fires_within_window() {
+        use txwatch_config::TimeWindow;
+        let now_utc = Utc::now();
+        let current_hour = now_utc.hour() as u8;
+
+        let tx = make_tx(true, &[], None);
+        let rules = &[AlertRule::AnyTransaction {
+            time_window: Some(TimeWindow {
+                start_hour: current_hour,
+                end_hour: if current_hour == 23 { 0 } else { current_hour + 1 },
+            }),
+        }];
+        let mut rule_contexts = vec![RuleContext::new(); rules.len()];
+
+        let payloads = run(rules, &tx);
+        assert_eq!(payloads.len(), 1);
+    }
+
+    #[test]
+    fn time_window_rule_does_not_fire_outside_window() {
+        use txwatch_config::TimeWindow;
+        let now_utc = Utc::now();
+        let current_hour = now_utc.hour() as u8;
+
+        let tx = make_tx(true, &[], None);
+        let rules = &[AlertRule::AnyTransaction {
+            time_window: Some(TimeWindow {
+                start_hour: if current_hour == 0 { 1 } else { current_hour - 1 },
+                end_hour: current_hour,
+            }),
+        }];
+        let mut rule_contexts = vec![RuleContext::new(); rules.len()];
+
+        let payloads = run(rules, &tx);
+        assert_eq!(payloads.len(), 0);
+    }
+
+    #[test]
+    fn time_window_rule_fires_at_start_hour_boundary() {
+        use txwatch_config::TimeWindow;
+        let now_utc = Utc::now();
+        let current_hour = now_utc.hour() as u8;
+
+        let tx = make_tx(true, &[], None);
+        let rules = &[AlertRule::AnyTransaction {
+            time_window: Some(TimeWindow {
+                start_hour: current_hour,
+                end_hour: 23,
+            }),
+        }];
+
+        let payloads = run(rules, &tx);
+        assert_eq!(payloads.len(), 1);
+    }
+
+    #[test]
+    fn time_window_rule_does_not_fire_at_end_hour_boundary() {
+        use txwatch_config::TimeWindow;
+        let now_utc = Utc::now();
+        let current_hour = now_utc.hour() as u8;
+
+        let tx = make_tx(true, &[], None);
+        let rules = &[AlertRule::AnyTransaction {
+            time_window: Some(TimeWindow {
+                start_hour: 0,
+                end_hour: current_hour,
+            }),
+        }];
+
+        let payloads = run(rules, &tx);
+        assert_eq!(payloads.len(), 0);
+    }
+
+    #[test]
+    fn function_name_pattern_glob_wildcard() {
+        let tx = make_tx(true, &["set_admin", "withdraw"], None);
+        let rules = &[AlertRule::FunctionNamePattern {
+            pattern: "set_*".into(),
+            mode: PatternMode::Glob,
+            time_window: None,
+        }];
+
+        let payloads = run(rules, &tx);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].rule_triggered, "FunctionNamePattern(glob:set_*)");
+    }
+
+    #[test]
+    fn function_name_pattern_glob_no_match() {
+        let tx = make_tx(true, &["withdraw"], None);
+        let rules = &[AlertRule::FunctionNamePattern {
+            pattern: "set_*".into(),
+            mode: PatternMode::Glob,
+            time_window: None,
+        }];
+
+        let payloads = run(rules, &tx);
+        assert_eq!(payloads.len(), 0);
+    }
+
+    #[test]
+    fn function_name_pattern_regex_match() {
+        let tx = make_tx(true, &["set_admin_v2", "withdraw"], None);
+        let rules = &[AlertRule::FunctionNamePattern {
+            pattern: r"set_.*".into(),
+            mode: PatternMode::Regex,
+            time_window: None,
+        }];
+
+        let payloads = run(rules, &tx);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].rule_triggered, "FunctionNamePattern(regex:set_.*)");
+    }
+
+    #[test]
+    fn function_name_pattern_regex_no_match() {
+        let tx = make_tx(true, &["withdraw"], None);
+        let rules = &[AlertRule::FunctionNamePattern {
+            pattern: r"set_.*".into(),
+            mode: PatternMode::Regex,
+            time_window: None,
+        }];
+
+        let payloads = run(rules, &tx);
+        assert_eq!(payloads.len(), 0);
+    }
+
+    #[test]
+    fn function_name_pattern_glob_multiple_functions_matches_first() {
+        let tx = make_tx(true, &["init", "set_fee"], None);
+        let rules = &[AlertRule::FunctionNamePattern {
+            pattern: "*fee*".into(),
+            mode: PatternMode::Glob,
+            time_window: None,
+        }];
+
+        let payloads = run(rules, &tx);
+        assert_eq!(payloads.len(), 1);
     }
 }
